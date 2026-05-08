@@ -198,7 +198,8 @@ def screening(
 
     # Optional attention mask (e.g., for padding tokens)
     if attention_mask is not None:
-        relevance = relevance * attention_mask[:, None, None, :]
+        mask = attention_mask.to(device=relevance.device, dtype=relevance.dtype)
+        relevance = relevance * mask[:, None, None, :]
 
     # @
     screened = relevance @ value
@@ -215,11 +216,13 @@ class GatedScreening(nn.Module):
         hidden_dim: int,  # phi
         num_heads: int,  # phi
         window_threshold: float = 256.0,
+        num_layers: int = 1,
     ):
         super().__init__()
 
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
+        self.num_layers = num_layers
         self.head_dim = hidden_dim // num_heads
         assert self.head_dim * num_heads == hidden_dim, (
             "hidden_dim must be divisible by num_heads"
@@ -268,7 +271,7 @@ class GatedScreening(nn.Module):
 
         # s_O
         self._scale = nn.Parameter(
-            torch.ones(1) * math.log(hidden_dim**-0.5),
+            torch.ones(1) * math.log(1 / math.sqrt(num_heads * num_layers)),
             requires_grad=True,
         )
 
@@ -351,6 +354,7 @@ class MultiScreen(nn.Module):
                     hidden_dim=hidden_dim,
                     num_heads=num_heads,
                     window_threshold=window_threshold,
+                    num_layers=num_blocks,
                 )
                 for _ in range(num_blocks)
             ]
