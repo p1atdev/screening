@@ -15,3 +15,5 @@ wheels/
 *.pdf
 .env
 arXiv-*/
+wandb/
+*.html
