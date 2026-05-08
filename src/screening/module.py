@@ -159,7 +159,7 @@ def screening(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    position_ids: torch.LongTensor,
+    position_ids: torch.Tensor,
     #
     window: torch.Tensor,
     window_threshold: float,  # distance threshold for MiPE
@@ -300,7 +300,7 @@ class GatedScreening(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_ids: torch.LongTensor,
+        position_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
@@ -399,7 +399,7 @@ class MultiScreen(nn.Module):
     def forward(
         self,
         input_ids: torch.LongTensor,
-        position_ids: torch.LongTensor,
+        position_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.token_embedding(input_ids)

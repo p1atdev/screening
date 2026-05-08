@@ -80,7 +80,7 @@ def test_apply_mipe_rotates_only_first_two_dimensions():
 
 def test_causal_softmask_masks_future_and_out_of_window_positions():
     mask = causal_softmask(
-        position_ids=torch.tensor([[0, 1, 2]]),
+        position_ids=torch.tensor([[0, 1, 2]], dtype=torch.long),
         window=torch.tensor([2.0]),
     )
 
@@ -112,7 +112,7 @@ def test_screening_attention_mask_removes_masked_key_contribution():
         query=query,
         key=key,
         value=value,
-        position_ids=torch.tensor([[0, 1, 2]]),
+        position_ids=torch.tensor([[0, 1, 2]], dtype=torch.long),
         window=torch.tensor([10.0]),
         window_threshold=1.0,
         acceptance=torch.tensor([1.0]),
@@ -121,7 +121,7 @@ def test_screening_attention_mask_removes_masked_key_contribution():
         query=query,
         key=key,
         value=value,
-        position_ids=torch.tensor([[0, 1, 2]]),
+        position_ids=torch.tensor([[0, 1, 2]], dtype=torch.long),
         window=torch.tensor([10.0]),
         window_threshold=1.0,
         acceptance=torch.tensor([1.0]),
