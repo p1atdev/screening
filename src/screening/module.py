@@ -1,10 +1,11 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-def unit_length_norm(x: torch.Tensor) -> torch.Tensor:
-    return x / x.norm(p=2, dim=-1, keepdim=True)
+def unit_length_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    return x / x.norm(p=2, dim=-1, keepdim=True).clip(min=eps)
 
 
 class TokenEmbedding(nn.Module):
@@ -16,25 +17,35 @@ class TokenEmbedding(nn.Module):
             embedding_dim,
         )
 
-        self.scale = nn.Parameter(
-            torch.ones(1) * embedding_dim**0.5,
+        # s_E
+        self._scale = nn.Parameter(
+            torch.zeros(1),
             requires_grad=True,
         )
+
+    @property
+    def scale(self) -> torch.Tensor:
+        return torch.exp(self._scale)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.scale * unit_length_norm(self.embedding(input_ids))
 
 
 class LMHead(nn.Module):
-    def __init__(self, embedding_dim: int, vocab_size: int):
+    def __init__(self, hidden_dim: int, vocab_size: int):
         super().__init__()
 
-        self.linear = nn.Linear(embedding_dim, vocab_size)
+        self.linear = nn.Linear(hidden_dim, vocab_size, bias=False)
 
-        self.scale = nn.Parameter(
-            torch.ones(1) * embedding_dim**-0.5,
+        # s_F
+        self._scale = nn.Parameter(
+            torch.ones(1) * math.log(hidden_dim**0.5),
             requires_grad=True,
         )
+
+    @property
+    def scale(self) -> torch.Tensor:
+        return torch.exp(self._scale)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         output = self.scale * self.linear(hidden_states)
@@ -44,14 +55,28 @@ class LMHead(nn.Module):
 # MiPE is a RoPE-like rotation [18] applied only to the first two dimensions,
 # with a rotation angle modulated by the learned screening window w.
 def mipe_rotation(
-    position_ids: torch.Tensor,
-    window: torch.Tensor,
-    window_threshold: float = 10.0,
+    position_ids: torch.Tensor,  # [batch_size, seq_len]
+    window: torch.Tensor,  # [num_heads]
+    window_threshold: float = 256.0,
 ) -> torch.Tensor:
+    batch_size, seq_len = position_ids.size()
+    num_heads = window.size(0)
+    window = window[None, :, None].repeat(
+        batch_size, 1, seq_len
+    )  # [batch_size, num_heads, seq_len]
 
-    angle = (torch.cos(torch.pi * window / window_threshold) + 1) / 2
+    # gamma(w)
+    gamma = torch.where(
+        window < window_threshold,
+        (torch.cos(torch.pi * window / window_threshold) + 1) / 2,
+        torch.zeros_like(window),
+    )
 
-    rotation = torch.pi * position_ids * angle / window
+    position_ids = position_ids[:, None, :].repeat(
+        1, num_heads, 1
+    )  # [batch_size, num_heads, seq_len]
+
+    rotation = torch.pi * position_ids * gamma / window
 
     return rotation
 
@@ -60,20 +85,17 @@ def apply_mipe(
     sequence: torch.Tensor,  # [batch_size, num_heads, seq_len, head_dim]
     position_ids: torch.Tensor,  # [batch_size, seq_len]
     window: torch.Tensor,
-    window_threshold: float = 10.0,
+    window_threshold: float = 256.0,
 ) -> torch.Tensor:
 
     rotation = mipe_rotation(
         position_ids=position_ids,
         window=window,
         window_threshold=window_threshold,
-    )  # [batch_size, seq_len]
+    )  # [batch_size, num_heads, seq_len]
 
     cos = torch.cos(rotation)
     sin = torch.sin(rotation)
-
-    cos = cos[:, None, :]  # [batch_size, 1, seq_len]
-    sin = sin[:, None, :]  # [batch_size, 1, seq_len]
 
     x1 = sequence[..., 0] * cos - sequence[..., 1] * sin
     x2 = sequence[..., 0] * sin + sequence[..., 1] * cos
@@ -82,13 +104,13 @@ def apply_mipe(
 
 
 def trim_similarity(
-    similarity: torch.Tensor,
-    acceptance: torch.Tensor,
+    similarity: torch.Tensor,  # [batch_size, num_heads, seq_len, seq_len]
+    acceptance: torch.Tensor,  # [num_heads]
 ) -> torch.Tensor:
 
     relevance = (
         torch.max(
-            1 - (1 - similarity) / acceptance,
+            1 - (1 - similarity) / acceptance[None, :, None, None],
             torch.zeros_like(similarity),
         )
         ** 2
@@ -97,21 +119,32 @@ def trim_similarity(
     return relevance
 
 
-def tanh_norm(x: torch.Tensor) -> torch.Tensor:
+def tanh_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     norm = x.norm(p=2, dim=-1, keepdim=True)
-    return torch.tanh(norm) * x / norm
+    scale = torch.where(
+        norm > eps,
+        torch.tanh(norm) / norm.clamp_min(eps),
+        torch.ones_like(norm),
+    )
+    return scale * x
 
 
 def causal_softmask(
-    position_ids: torch.Tensor,
-    window: torch.Tensor,
+    position_ids: torch.Tensor,  # [batch_size, seq_len]
+    window: torch.Tensor,  # [num_heads]
 ) -> torch.Tensor:
-    position_diff = position_ids[:, :, None] - position_ids[:, None, :]
+    position_diff = position_ids[:, None, :] - position_ids[:, :, None]
+    # [batch_size, seq_len, seq_len]
+    position_diff = position_diff[:, None, :, :].repeat(
+        1, window.size(0), 1, 1
+    )  # [batch_size, num_heads, seq_len, seq_len]
+
+    window = window[None, :, None, None]
 
     mask = torch.where(
         (-window < position_diff) & (position_diff <= 0),
         (torch.cos(torch.pi * position_diff / window) + 1) / 2,
-        torch.ones_like(position_diff),
+        torch.zeros_like(position_diff),
     )
 
     return mask
@@ -138,6 +171,12 @@ def screening(
         window=window,
         window_threshold=window_threshold,
     )
+    key = apply_mipe(
+        sequence=key,
+        position_ids=position_ids,
+        window=window,
+        window_threshold=window_threshold,
+    )
 
     similarity = query @ key.transpose(-2, -1)
 
@@ -148,8 +187,7 @@ def screening(
     softmask = causal_softmask(
         position_ids=position_ids,
         window=window,
-    )  # [batch_size, seq_len, seq_len]
-    softmask = softmask[:, None, :, :]  # [batch_size, 1, seq_len, seq_len]
+    )  # [batch_size, num_heads, seq_len, seq_len]
     relevance = relevance * softmask
 
     # @
@@ -164,9 +202,9 @@ def screening(
 class GatedScreening(nn.Module):
     def __init__(
         self,
-        hidden_dim: int,
-        num_heads: int,
-        window_threshold: float = 10.0,
+        hidden_dim: int,  # phi
+        num_heads: int,  # phi
+        window_threshold: float = 256.0,
     ):
         super().__init__()
 
@@ -179,13 +217,13 @@ class GatedScreening(nn.Module):
 
         # s_w
         self._window_exponent = nn.Parameter(
-            torch.ones(1),
+            torch.linspace(0, math.log(window_threshold), num_heads),
             requires_grad=True,
         )
 
         # s_r
         self._acceptance = nn.Parameter(
-            torch.ones(1),
+            torch.zeros(num_heads),
             requires_grad=True,
         )
 
@@ -218,8 +256,9 @@ class GatedScreening(nn.Module):
             bias=False,
         )
 
-        self.scale = nn.Parameter(
-            torch.ones(1) * hidden_dim**-0.5,
+        # s_O
+        self._scale = nn.Parameter(
+            torch.ones(1) * math.log(hidden_dim**-0.5),
             requires_grad=True,
         )
 
@@ -230,6 +269,10 @@ class GatedScreening(nn.Module):
     @property
     def acceptance(self) -> torch.Tensor:
         return torch.sigmoid(self._acceptance)
+
+    @property
+    def scale(self) -> torch.Tensor:
+        return torch.exp(self._scale)
 
     def pre_screening_reshape(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = x.size()
@@ -261,6 +304,7 @@ class GatedScreening(nn.Module):
             window_threshold=self.window_threshold,
             acceptance=self.acceptance,
         )
+        # print(f"screened: {screened.shape}, gate: {gate.shape}")
         screened = screened * torch.tanh(F.silu(gate))
         screened = self.post_screening_reshape(screened)
 
@@ -270,11 +314,11 @@ class GatedScreening(nn.Module):
 class MultiScreen(nn.Module):
     def __init__(
         self,
-        hidden_dim: int,
-        num_heads: int,
-        num_blocks: int,
+        hidden_dim: int,  # phi^2
+        num_heads: int,  # phi
+        num_blocks: int,  # phi
         vocab_size: int = 64,
-        window_threshold: float = 10.0,
+        window_threshold: float = 256.0,
     ):
         super().__init__()
 
@@ -295,7 +339,7 @@ class MultiScreen(nn.Module):
         )
 
         self.head = LMHead(
-            embedding_dim=hidden_dim,
+            hidden_dim=hidden_dim,
             vocab_size=vocab_size,
         )
 
@@ -307,7 +351,7 @@ class MultiScreen(nn.Module):
         hidden_states = self.token_embedding(input_ids)
 
         for layer in self.layers:
-            hidden_states = layer(
+            hidden_states = hidden_states + layer(
                 hidden_states=hidden_states,
                 position_ids=position_ids,
             )
