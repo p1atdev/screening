@@ -24,10 +24,16 @@
 
 import random
 import string
+from .tokenizer import TokenizerProtocol
 
 
-def generate_by_line_count(n_lines, depth, n_digits=6, n_trials=1000):
-    assert n_lines >= 50, f"n_line must be at least 50"
+def generate_by_line_count(
+    n_lines: int,
+    depth: float,
+    n_digits: int = 6,
+    n_trials: int = 1000,
+):
+    assert n_lines >= 50, "n_lines must be at least 50"
     rng = random.Random(123)
     out = []
     for _ in range(n_trials):
@@ -47,7 +53,13 @@ def generate_by_line_count(n_lines, depth, n_digits=6, n_trials=1000):
     return out
 
 
-def generate_by_token_count(n_tokens, depth, tokenizer, n_digits=6, n_trials=1000):
+def generate_by_token_count(
+    n_tokens: int,
+    depth: float,
+    tokenizer: TokenizerProtocol,
+    n_digits: int = 6,
+    n_trials: int = 1000,
+):
     rng = random.Random(123)
     out = []
     for _ in range(n_trials):
