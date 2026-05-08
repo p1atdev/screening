@@ -25,6 +25,9 @@ def test_init_multiscreen_wo_grad():
         _logits = model(
             input_ids=torch.tensor([[0, 1, 2], [3, 4, 5]], dtype=torch.long),
             position_ids=torch.tensor([[0, 1, 2], [0, 1, 2]], dtype=torch.long),
+            attention_mask=torch.tensor(
+                [[1, 1, 0], [1, 1, 1]], dtype=torch.float
+            ),  # Example mask
         )
 
 
@@ -48,6 +51,9 @@ def test_init_multiscreen_with_grad():
     logits = model(
         input_ids=torch.tensor([[0, 1, 2], [3, 4, 5]], dtype=torch.long),
         position_ids=torch.tensor([[0, 1, 2], [0, 1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor(
+            [[1, 1, 0], [1, 1, 1]], dtype=torch.float
+        ),  # Example mask
     )
 
     loss = logits.sum()

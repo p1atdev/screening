@@ -48,7 +48,12 @@ class LMHead(nn.Module):
         return torch.exp(self._scale)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        output = self.scale * self.linear(hidden_states)
+        output = self.scale * F.linear(
+            hidden_states,
+            weight=unit_length_norm(self.linear.weight),
+            bias=self.linear.bias,
+        )
+
         return output
 
 
@@ -159,6 +164,7 @@ def screening(
     window: torch.Tensor,
     window_threshold: float,  # distance threshold for MiPE
     acceptance: torch.Tensor,  # similarity acceptance
+    attention_mask: torch.Tensor | None = None,  # [batch_size, seq_len] mask
 ) -> torch.Tensor:
     query = unit_length_norm(query)
     key = unit_length_norm(key)
@@ -189,6 +195,10 @@ def screening(
         window=window,
     )  # [batch_size, num_heads, seq_len, seq_len]
     relevance = relevance * softmask
+
+    # Optional attention mask (e.g., for padding tokens)
+    if attention_mask is not None:
+        relevance = relevance * attention_mask[:, None, None, :]
 
     # @
     screened = relevance @ value
@@ -288,6 +298,7 @@ class GatedScreening(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         q = self.pre_screening_reshape(self.to_q(hidden_states))
@@ -303,6 +314,7 @@ class GatedScreening(nn.Module):
             window=self.window,
             window_threshold=self.window_threshold,
             acceptance=self.acceptance,
+            attention_mask=attention_mask,
         )
         # print(f"screened: {screened.shape}, gate: {gate.shape}")
         screened = screened * torch.tanh(F.silu(gate))
@@ -321,6 +333,12 @@ class MultiScreen(nn.Module):
         window_threshold: float = 256.0,
     ):
         super().__init__()
+
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        self.num_blocks = num_blocks
+        self.window_threshold = window_threshold
 
         self.token_embedding = TokenEmbedding(
             vocab_size=vocab_size,
@@ -343,10 +361,42 @@ class MultiScreen(nn.Module):
             vocab_size=vocab_size,
         )
 
+        self.init_weights()
+
+    def init_weights(self):
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Linear):
+                if "to_gate" in name:
+                    nn.init.normal_(module.weight, mean=0.0, std=0.1)
+                elif "to_q" in name or "to_k" in name or "to_v" in name:
+                    nn.init.normal_(
+                        module.weight,
+                        mean=0.0,
+                        std=0.1 / math.sqrt(self.head_dim),
+                    )
+                elif "to_out" in name:
+                    nn.init.normal_(
+                        module.weight, mean=0.0, std=0.1 / math.sqrt(self.hidden_dim)
+                    )
+                else:
+                    nn.init.normal_(
+                        module.weight,
+                        mean=0.0,
+                        std=0.1 / math.sqrt(module.in_features),
+                    )
+
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(
+                    module.weight, mean=0.0, std=0.1 / math.sqrt(module.embedding_dim)
+                )
+
     def forward(
         self,
         input_ids: torch.LongTensor,
         position_ids: torch.LongTensor,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.token_embedding(input_ids)
 
@@ -354,6 +404,7 @@ class MultiScreen(nn.Module):
             hidden_states = hidden_states + layer(
                 hidden_states=hidden_states,
                 position_ids=position_ids,
+                attention_mask=attention_mask,
             )
 
         logits = self.head(hidden_states)
