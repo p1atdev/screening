@@ -3,6 +3,7 @@ import math
 import torch
 
 from screening.modules import (
+    GatedScreening,
     apply_mipe,
     causal_softmask,
     mipe_rotation,
@@ -247,6 +248,47 @@ def test_screening_attention_mask_removes_masked_key_contribution():
 
     assert unmasked[0, 0, 1, 1] > 0
     torch.testing.assert_close(masked[0, 0, 1, 1], torch.tensor(0.0))
+
+
+def test_gated_screening_traces_score_matrix_and_gate_outputs():
+    layer = GatedScreening(
+        hidden_dim=8,
+        num_heads=2,
+        window_threshold=8.0,
+        is_causal=False,
+    )
+    layer.set_trace_screening(True)
+    hidden_states = torch.randn(1, 4, 8)
+    position_ids = torch.tensor(
+        [
+            [
+                [0, 0],
+                [0, 1],
+                [1, 0],
+                [1, 1],
+            ]
+        ]
+    )
+
+    output = layer(hidden_states, position_ids=position_ids)
+
+    assert output.shape == hidden_states.shape
+    assert set(layer.screening_trace) == {"score", "before_gate", "after_gate"}
+    assert layer.screening_trace["score"].shape == torch.Size([1, 2, 4, 4])
+    assert layer.screening_trace["score"].device.type == "cpu"
+    assert not layer.screening_trace["score"].requires_grad
+    assert torch.isfinite(layer.screening_trace["score"]).all()
+    assert layer.screening_trace["before_gate"].shape == torch.Size([1, 2, 4, 4])
+    assert not layer.screening_trace["before_gate"].requires_grad
+    assert torch.isfinite(layer.screening_trace["before_gate"]).all()
+    assert layer.screening_trace["after_gate"].shape == torch.Size([1, 2, 4, 4])
+    assert not layer.screening_trace["after_gate"].requires_grad
+    assert torch.isfinite(layer.screening_trace["after_gate"]).all()
+
+    layer.set_trace_screening(False)
+    _output = layer(hidden_states, position_ids=position_ids)
+
+    assert layer.screening_trace == {}
 
 
 def test_multiscreen_initial_scalar_parameters_match_paper_values():

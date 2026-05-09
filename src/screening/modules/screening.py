@@ -155,7 +155,8 @@ def screening(
     position_ids: torch.Tensor | None = None,  # [batch_size, seq_len, num_axes]
     attention_mask: torch.Tensor | None = None,  # [batch_size, seq_len] mask
     is_causal: bool = True,
-) -> torch.Tensor:
+    return_score: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     query = unit_length_norm(query)
     key = unit_length_norm(key)
     value = unit_length_norm(value)
@@ -201,6 +202,9 @@ def screening(
 
     # TanhNorm
     screened = tanh_norm(screened)
+
+    if return_score:
+        return screened, relevance
 
     return screened
 
@@ -272,6 +276,9 @@ class GatedScreening(nn.Module):
             requires_grad=True,
         )
 
+        self.screening_trace: dict[str, torch.Tensor] = {}
+        self.trace_screening = False
+
     @property
     def window(self) -> torch.Tensor:
         return torch.exp(self._window_exponent) + 1
@@ -283,6 +290,10 @@ class GatedScreening(nn.Module):
     @property
     def scale(self) -> torch.Tensor:
         return torch.exp(self._scale)
+
+    def set_trace_screening(self, value: bool):
+        self.trace_screening = value
+        self.screening_trace.clear()
 
     def pre_screening_reshape(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = x.size()
@@ -306,7 +317,7 @@ class GatedScreening(nn.Module):
         v = self.pre_screening_reshape(self.to_v(hidden_states))
         gate = self.pre_screening_reshape(self.to_gate(hidden_states))
 
-        screened = screening(
+        screening_output = screening(
             query=q,
             key=k,
             value=v,
@@ -316,9 +327,26 @@ class GatedScreening(nn.Module):
             acceptance=self.acceptance,
             attention_mask=attention_mask,
             is_causal=self.is_causal,
+            return_score=self.trace_screening,
         )
+        if self.trace_screening:
+            screened, screening_score = screening_output
+            with torch.no_grad():
+                self.screening_trace = {
+                    "score": screening_score.detach().cpu(),
+                    "before_gate": screened.detach().cpu(),
+                }
+        else:
+            screened = screening_output
+            self.screening_trace.clear()
+
         # print(f"screened: {screened.shape}, gate: {gate.shape}")
         screened = screened * torch.tanh(F.silu(gate))
+
+        if self.trace_screening:
+            with torch.no_grad():
+                self.screening_trace["after_gate"] = screened.detach().cpu()
+
         screened = self.post_screening_reshape(screened)
 
         return self.to_out(screened) * self.scale

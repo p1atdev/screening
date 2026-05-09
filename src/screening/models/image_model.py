@@ -114,6 +114,10 @@ class MultiScreenForImageClassification(nn.Module):
     def set_gradient_checkpointing(self, value: bool):
         self.gradient_checkpointing = value
 
+    def set_trace_screening(self, value: bool):
+        for layer in self.layers:
+            layer.set_trace_screening(value)
+
     def forward(
         self,
         image_feature: torch.Tensor,
