@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 
+from .common import SwiGLU
+
 
 class Attention(nn.Module):
     def __init__(self, hidden_dim: int, num_heads: int):
@@ -54,24 +56,6 @@ class Attention(nn.Module):
         return out
 
 
-class SwiGLU(nn.Module):
-    def __init__(self, hidden_dim: int, multiple_of: int = 64):
-        super().__init__()
-
-        intermediate_dim = 4 * hidden_dim
-        intermediate_dim = int(2 * intermediate_dim / 3)
-        intermediate_dim = multiple_of * (
-            (intermediate_dim + multiple_of - 1) // multiple_of
-        )
-
-        self.w1 = nn.Linear(hidden_dim, intermediate_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, intermediate_dim, bias=False)
-        self.w3 = nn.Linear(intermediate_dim, hidden_dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w3(F.silu(self.w1(x)) * self.w2(x))
-
-
 class TransformerBlock(nn.Module):
     def __init__(self, hidden_dim: int, num_heads: int, multiple_of: int = 64):
         super().__init__()
@@ -79,7 +63,7 @@ class TransformerBlock(nn.Module):
         self.attn_norm = nn.RMSNorm(hidden_dim)
         self.attn = Attention(hidden_dim, num_heads)
         self.mlp_norm = nn.RMSNorm(hidden_dim)
-        self.mlp = SwiGLU(hidden_dim, multiple_of)
+        self.mlp = SwiGLU(hidden_dim, hidden_dim, multiple_of=multiple_of)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.attn_norm(x))

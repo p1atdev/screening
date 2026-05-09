@@ -156,6 +156,7 @@ def test_apply_mipe_rotates_2d():
             ]
         ),
     )
+    assert sequence.shape == encoded.shape
 
 
 def test_causal_softmask_masks_future_and_out_of_window_positions():

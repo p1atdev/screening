@@ -1,0 +1,75 @@
+import math
+
+import torch
+
+from screening.models import MultiScreenForClassFlowMatching
+
+
+def test_init_class_flow_matching_model():
+    image_size = 32
+    patch_size = 16
+    h_patch = image_size // patch_size
+    w_patch = image_size // patch_size
+
+    num_repeats = 8
+
+    model = MultiScreenForClassFlowMatching(
+        hidden_dim=64,
+        num_heads=4,
+        num_blocks=4,
+        num_classes=10,
+        num_repeats=num_repeats,
+        bottleneck_dim=16,
+        in_channels=3,
+        patch_size=patch_size,
+    )
+
+    assert isinstance(model, MultiScreenForClassFlowMatching)
+
+    images = torch.randn(2, 3, image_size, image_size)
+    label_ids = torch.randint(0, 10, (2,))
+    timestep = torch.rand(2)
+    attention_mask = torch.ones(
+        1, num_repeats + num_repeats + h_patch * w_patch
+    )  # [1, num_patches]
+
+    output = model(
+        images=images,
+        label_ids=label_ids,
+        timestep=timestep,
+        attention_mask=attention_mask,
+    )
+
+    assert output.shape == (2, 3, 32, 32)
+
+
+def test_generate_class_flow_matching_model():
+    image_size = 32
+    patch_size = 16
+    num_repeats = 8
+
+    model = MultiScreenForClassFlowMatching(
+        hidden_dim=64,
+        num_heads=4,
+        num_blocks=4,
+        num_classes=10,
+        num_repeats=num_repeats,
+        bottleneck_dim=16,
+        in_channels=3,
+        patch_size=patch_size,
+    )
+
+    assert isinstance(model, MultiScreenForClassFlowMatching)
+
+    label_ids = torch.randint(0, 10, (2,))
+
+    images = model.generate(
+        label_ids=label_ids,
+        width=image_size,
+        height=image_size,
+        num_steps=20,
+        cfg_scale=3.0,
+    )
+
+    assert isinstance(images, list)
+    assert len(images) == 2
