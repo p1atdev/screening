@@ -1,0 +1,67 @@
+image_dir: ~/WDC20/Documents/python/anime-face-dev/data/animeface-20s-1.8M
+tags_dir: ~/WDC20/Documents/python/anime-face-dev/data/tags
+label2id_path: configs/animeface-label2id.json
+image_glob: "*.webp"
+image_mode: RGB
+image_size: 256
+max_samples: null
+shuffle_tags: true
+filter_unknown_tags: true
+include_rating: true
+include_character_tags: true
+include_general_tags: true
+tag_separator: " "
+max_context_len: 64
+
+hidden_dim: 256
+num_blocks: 16
+num_heads: 16
+num_repeats: 8
+bottleneck_dim: 16
+patch_size: 16
+window_threshold: 256.0
+
+batch_size: 128
+epochs: 20
+max_steps: null
+lr: 0.001
+optimizer: radam_schedule_free # options: adamw, radam_schedule_free
+betas:
+  - 0.9
+  - 0.99
+weight_decay: 0.0
+grad_clip_norm: 1.0
+min_timestep: 0.0
+max_timestep: 1.0
+cfg_dropout_prob: 0.1
+loss_type: v-loss # options: x-loss, v-loss
+
+log_every: 20
+checkpoint_every: 1000
+samples:
+  at_start: true
+  every: 200
+  num_steps: 64
+  cfg_scale: 3.0
+  width: 256
+  height: 256
+  max_context_len: null
+  prompts:
+    - "general 1girl solo portrait looking_at_viewer blue_hair short_hair blush cat_ears open_mouth cat_ears animal_ears red_eyes white_background"
+    - "general 1girl aqua_eyes baseball_cap blonde_hair closed_mouth earrings green_background hat hoop_earrings jewelry looking_at_viewer shirt short_hair simple_background solo portrait yellow_shirt"
+  dataset_prompts: 0
+  num_images_per_prompt: 9
+  seed: 123
+  columns: null
+output_dir: output/animeface-07
+checkpoint_path: output/animeface-07/checkpoints/last.ckpt
+
+seed: 123
+device: auto
+num_workers: 4
+gradient_checkpointing: true
+precision: bf16
+
+wandb_project: screening-animeface-flow-matching
+wandb_run_name: null
+wandb_mode: online # options: online, offline, disabled

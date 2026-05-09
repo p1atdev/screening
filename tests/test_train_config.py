@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from PIL import Image
 import pytest
 import torch
 from pydantic import ValidationError
@@ -12,6 +13,16 @@ from train.flow_matching import TrainConfig as FlowMatchingTrainConfig
 from train.flow_matching import apply_cfg_dropout
 from train.flow_matching import flow_matching_loss
 from train.flow_matching import load_config as load_flow_matching_config
+from train.context_flow_matching import TrainConfig as ContextFlowMatchingTrainConfig
+from train.context_flow_matching import apply_prompt_dropout
+from train.context_flow_matching import build_optimizer
+from train.context_flow_matching import load_config as load_context_flow_matching_config
+from train.context_flow_matching import metadata_to_prompt
+from train.context_flow_matching import optimizer_eval
+from train.context_flow_matching import optimizer_train
+from train.context_flow_matching import pil_grid
+from train.context_flow_matching import sample_prompt_groups
+from train.context_flow_matching import sample_wandb_key
 
 
 def test_load_abcd_digits_config_uses_yaml_and_overrides(tmp_path: Path):
@@ -223,3 +234,195 @@ def test_flow_matching_v_loss_uses_noisy_image_and_target_image_velocity():
         expected_target_velocity,
     )
     torch.testing.assert_close(loss, expected_loss)
+
+
+def test_load_context_flow_matching_config_uses_nested_samples(tmp_path: Path):
+    config_path = tmp_path / "context_flow_matching.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "image_dir: ./images",
+                "tags_dir: ./tags",
+                "label2id_path: ./label2id.json",
+                "image_size: 32",
+                "hidden_dim: 32",
+                "num_heads: 4",
+                "num_blocks: 2",
+                "patch_size: 16",
+                "max_context_len: 12",
+                "optimizer: radam_schedule_free",
+                "loss_type: v-loss",
+                "samples:",
+                "  every: 7",
+                "  num_steps: 3",
+                "  cfg_scale: 2.5",
+                "  prompts:",
+                "    - general 1girl",
+                "  dataset_prompts: 2",
+                "  num_images_per_prompt: 2",
+                "  columns: 2",
+                "gradient_checkpointing: true",
+                "precision: bf16",
+                "wandb_mode: offline",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_context_flow_matching_config(config_path, overrides={"batch_size": 4})
+
+    assert cfg.image_dir == Path("images")
+    assert cfg.tags_dir == Path("tags")
+    assert cfg.label2id_path == Path("label2id.json")
+    assert cfg.batch_size == 4
+    assert cfg.optimizer == "radam_schedule_free"
+    assert cfg.loss_type == "v-loss"
+    assert cfg.samples.every == 7
+    assert cfg.samples.num_steps == 3
+    assert cfg.samples.cfg_scale == 2.5
+    assert cfg.samples.prompts == ["general 1girl"]
+    assert cfg.samples.dataset_prompts == 2
+    assert cfg.samples.num_images_per_prompt == 2
+    assert cfg.samples.columns == 2
+    assert cfg.gradient_checkpointing is True
+    assert cfg.precision == "bf16"
+    assert cfg.wandb_mode == "offline"
+
+
+def test_context_flow_matching_train_config_rejects_bad_sample_shape():
+    with pytest.raises(ValidationError):
+        ContextFlowMatchingTrainConfig(
+            image_size=32,
+            patch_size=16,
+            samples={"width": 30},
+        )
+
+
+def test_context_flow_matching_train_config_rejects_unknown_optimizer():
+    with pytest.raises(ValidationError):
+        ContextFlowMatchingTrainConfig(optimizer="lion")
+
+
+def test_context_build_optimizer_can_use_radam_schedule_free():
+    cfg = ContextFlowMatchingTrainConfig(
+        image_size=32,
+        patch_size=16,
+        optimizer="radam_schedule_free",
+    )
+    model = torch.nn.Linear(2, 1)
+
+    optimizer = build_optimizer(model.parameters(), cfg)
+    optimizer_train(optimizer)
+    optimizer_eval(optimizer)
+
+    assert optimizer.__class__.__name__ == "RAdamScheduleFree"
+
+
+def test_metadata_to_prompt_filters_unknown_tags_in_stable_order():
+    metadata = {
+        "rating": "general",
+        "character_tags": {
+            "known_character": 0.9,
+            "unknown_character": 0.8,
+        },
+        "general_tags": {
+            "1girl": 0.99,
+            "unknown_general": 0.7,
+        },
+    }
+    label2id = {
+        "general": 0,
+        "known_character": 1,
+        "1girl": 2,
+    }
+
+    prompt = metadata_to_prompt(
+        metadata=metadata,
+        label2id=label2id,
+        shuffle_tags=False,
+        filter_unknown_tags=True,
+        include_rating=True,
+        include_character_tags=True,
+        include_general_tags=True,
+        tag_separator=" ",
+    )
+
+    assert prompt == "general known_character 1girl"
+
+
+def test_apply_prompt_dropout_can_force_unconditional_prompts():
+    prompts = ["general 1girl", "sensitive solo"]
+
+    kept, keep_fraction = apply_prompt_dropout(prompts=prompts, dropout_prob=0.0)
+    dropped, drop_fraction = apply_prompt_dropout(prompts=prompts, dropout_prob=1.0)
+
+    assert kept == prompts
+    assert dropped == ["", ""]
+    assert keep_fraction == 0.0
+    assert drop_fraction == 1.0
+
+
+def test_context_sample_prompt_groups_keep_prompt_batches():
+    class DummyDataset:
+        def __len__(self) -> int:
+            return 2
+
+        def prompt_for_index(self, index: int, shuffle_tags: bool = False) -> str:
+            return f"dataset_{index}_{shuffle_tags}"
+
+    cfg = ContextFlowMatchingTrainConfig(
+        image_size=32,
+        patch_size=16,
+        samples={
+            "prompts": ["general 1girl"],
+            "dataset_prompts": 1,
+            "num_images_per_prompt": 3,
+        },
+    )
+
+    groups = sample_prompt_groups(cfg, DummyDataset())
+
+    assert groups == [
+        ("general 1girl", ["general 1girl"] * 3),
+        ("dataset_0_False", ["dataset_0_False"] * 3),
+    ]
+
+
+def test_context_sample_prompt_groups_default_to_config_prompts_only():
+    class DummyDataset:
+        def __len__(self) -> int:
+            return 2
+
+        def prompt_for_index(self, index: int, shuffle_tags: bool = False) -> str:
+            return f"dataset_{index}_{shuffle_tags}"
+
+    cfg = ContextFlowMatchingTrainConfig(
+        image_size=32,
+        patch_size=16,
+        samples={
+            "prompts": ["first", "second"],
+            "num_images_per_prompt": 2,
+        },
+    )
+
+    groups = sample_prompt_groups(cfg, DummyDataset())
+
+    assert cfg.samples.dataset_prompts == 0
+    assert groups == [
+        ("first", ["first", "first"]),
+        ("second", ["second", "second"]),
+    ]
+
+
+def test_pil_grid_uses_auto_columns():
+    images = [Image.new("RGB", (8, 8), (index * 20, 0, 0)) for index in range(5)]
+
+    grid = pil_grid(images)
+
+    assert grid.mode == "RGB"
+    assert grid.size == (40, 28)
+
+
+def test_sample_wandb_key_uses_prompt_index():
+    assert sample_wandb_key(0) == "samples/grid_00"
+    assert sample_wandb_key(12) == "samples/grid_12"
