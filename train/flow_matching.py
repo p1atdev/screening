@@ -16,12 +16,14 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm import tqdm
 
+from screening.flow import image_pred_to_velocity_pred
 from screening.image import tensor_to_pil
 from screening.models import MultiScreenForClassFlowMatching
 
 Precision = Literal["fp32", "fp16", "bf16"]
 WandbMode = Literal["online", "offline", "disabled"]
 ImageMode = Literal["L", "RGB", "RGBA"]
+LossType = Literal["x-loss", "v-loss"]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "flow_matching_one_image.yaml"
@@ -57,6 +59,7 @@ class TrainConfig(BaseModel):
     min_timestep: float = Field(default=0.0, ge=0.0, lt=1.0)
     max_timestep: float = Field(default=1.0, gt=0.0, le=1.0)
     cfg_dropout_prob: float = Field(default=0.1, ge=0.0, le=1.0)
+    loss_type: LossType = "x-loss"
 
     log_every: int = Field(default=20, gt=0)
     sample_every: int = Field(default=100, gt=0)
@@ -329,6 +332,29 @@ def apply_cfg_dropout(
     return dropped_label_ids, float(drop_mask.float().mean().item())
 
 
+def flow_matching_loss(
+    pred_images: torch.Tensor,
+    target_images: torch.Tensor,
+    noisy_images: torch.Tensor,
+    timestep: torch.Tensor,
+    loss_type: LossType,
+) -> torch.Tensor:
+    if loss_type == "x-loss":
+        return F.mse_loss(pred_images, target_images)
+
+    pred_velocity = image_pred_to_velocity_pred(
+        pred_image=pred_images,
+        noisy_image=noisy_images,
+        timestep=timestep,
+    )
+    target_velocity = image_pred_to_velocity_pred(
+        pred_image=target_images,
+        noisy_image=noisy_images,
+        timestep=timestep,
+    )
+    return F.mse_loss(pred_velocity, target_velocity)
+
+
 def forward_loss(
     model: MultiScreenForClassFlowMatching,
     images: torch.Tensor,
@@ -352,15 +378,29 @@ def forward_loss(
             label_ids=label_ids,
             timestep=timestep,
         )
-        loss = F.mse_loss(pred_images, images)
+        loss = flow_matching_loss(
+            pred_images=pred_images,
+            target_images=images,
+            noisy_images=noisy_images,
+            timestep=timestep,
+            loss_type=cfg.loss_type,
+        )
 
     with torch.no_grad():
         noise_mse = F.mse_loss(noisy_images, images)
         pred_mse = F.mse_loss(pred_images.float(), images.float())
+        velocity_mse = flow_matching_loss(
+            pred_images=pred_images.float(),
+            target_images=images.float(),
+            noisy_images=noisy_images.float(),
+            timestep=timestep.float(),
+            loss_type="v-loss",
+        )
         noise_norm = noise.float().pow(2).mean().sqrt()
     metrics = {
         "train/noisy_mse": float(noise_mse.item()),
         "train/pred_mse": float(pred_mse.item()),
+        "train/velocity_mse": float(velocity_mse.item()),
         "train/timestep_mean": float(timestep.float().mean().item()),
         "train/noise_rms": float(noise_norm.item()),
         "train/cfg_dropout_fraction": cfg_dropout_fraction,

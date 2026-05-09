@@ -7,9 +7,9 @@ label_id: 0
 num_classes: 1
 repeats_per_epoch: 1024
 
-hidden_dim: 64
-num_heads: 8
-num_blocks: 8
+hidden_dim: 128
+num_heads: 4
+num_blocks: 6
 num_repeats: 8
 bottleneck_dim: 16
 patch_size: 16
@@ -17,7 +17,7 @@ window_threshold: 256.0
 
 batch_size: 16
 epochs: 100
-max_steps: null
+max_steps: 5000
 lr: 0.01
 betas:
   - 0.9
@@ -27,6 +27,7 @@ grad_clip_norm: 1.0
 min_timestep: 0.0
 max_timestep: 1.0
 cfg_dropout_prob: 0.0 # overfit mode
+loss_type: v-loss # options: x-loss, v-loss
 
 log_every: 20
 sample_every: 500
@@ -35,8 +36,8 @@ sample_at_start: true
 sample_num_images: 1
 sample_num_steps: 64
 sample_cfg_scale: 1.0
-output_dir: output/fm-03
-checkpoint_path: output/fm-03/checkpoints/last.ckpt
+output_dir: output/fm-05
+checkpoint_path: output/fm-05/checkpoints/last.ckpt
 
 seed: 123
 device: auto

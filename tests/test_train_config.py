@@ -10,6 +10,7 @@ from train.mnist import TrainConfig as MNISTTrainConfig
 from train.mnist import load_config as load_mnist_config
 from train.flow_matching import TrainConfig as FlowMatchingTrainConfig
 from train.flow_matching import apply_cfg_dropout
+from train.flow_matching import flow_matching_loss
 from train.flow_matching import load_config as load_flow_matching_config
 
 
@@ -120,6 +121,7 @@ def test_load_flow_matching_config_uses_yaml_and_overrides(tmp_path: Path):
                 "patch_size: 16",
                 "betas: [0.8, 0.9]",
                 "cfg_dropout_prob: 0.25",
+                "loss_type: v-loss",
                 "gradient_checkpointing: true",
                 "precision: bf16",
                 "wandb_project: screening-flow-test",
@@ -138,6 +140,7 @@ def test_load_flow_matching_config_uses_yaml_and_overrides(tmp_path: Path):
     assert cfg.hidden_dim == 32
     assert cfg.betas == (0.8, 0.9)
     assert cfg.cfg_dropout_prob == 0.25
+    assert cfg.loss_type == "v-loss"
     assert cfg.gradient_checkpointing is True
     assert cfg.precision == "bf16"
     assert cfg.wandb_project == "screening-flow-test"
@@ -166,6 +169,11 @@ def test_flow_matching_train_config_rejects_bad_cfg_dropout_prob():
         FlowMatchingTrainConfig(cfg_dropout_prob=1.1)
 
 
+def test_flow_matching_train_config_rejects_unknown_loss_type():
+    with pytest.raises(ValidationError):
+        FlowMatchingTrainConfig(loss_type="eps-loss")
+
+
 def test_apply_cfg_dropout_can_force_unconditional_labels():
     labels = torch.tensor([0, 1, 2])
 
@@ -184,3 +192,34 @@ def test_apply_cfg_dropout_can_force_unconditional_labels():
     torch.testing.assert_close(dropped, torch.full_like(labels, 9))
     assert keep_fraction == 0.0
     assert drop_fraction == 1.0
+
+
+def test_flow_matching_v_loss_uses_noisy_image_and_target_image_velocity():
+    target_images = torch.tensor([[[[2.0]]]])
+    noise_images = torch.tensor([[[[-1.0]]]])
+    pred_images = torch.tensor([[[[1.25]]]])
+    timestep = torch.tensor([0.25])
+    noisy_images = (
+        timestep[:, None, None, None] * target_images
+        + (1.0 - timestep[:, None, None, None]) * noise_images
+    )
+
+    loss = flow_matching_loss(
+        pred_images=pred_images,
+        target_images=target_images,
+        noisy_images=noisy_images,
+        timestep=timestep,
+        loss_type="v-loss",
+    )
+
+    expected_pred_velocity = (pred_images - noisy_images) / (1.0 - timestep)[
+        :, None, None, None
+    ]
+    expected_target_velocity = (target_images - noisy_images) / (1.0 - timestep)[
+        :, None, None, None
+    ]
+    expected_loss = torch.nn.functional.mse_loss(
+        expected_pred_velocity,
+        expected_target_velocity,
+    )
+    torch.testing.assert_close(loss, expected_loss)
