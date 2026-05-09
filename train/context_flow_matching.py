@@ -811,6 +811,7 @@ def save_training_samples(
         cfg_scale=cfg.samples.cfg_scale,
         device=device,
         max_context_len=sample_max_context_len(cfg),
+        seed=cfg.samples.seed,
     )
 
     if generator_state is not None:

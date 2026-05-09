@@ -3,7 +3,7 @@ tags_dir: ~/WDC20/Documents/python/anime-face-dev/data/tags
 label2id_path: configs/animeface-label2id.json
 image_glob: "*.webp"
 image_mode: RGB
-image_size: 256
+image_size: 128
 max_samples: null
 shuffle_tags: true
 filter_unknown_tags: true
@@ -13,9 +13,9 @@ include_general_tags: true
 tag_separator: " "
 max_context_len: 64
 
-hidden_dim: 256
-num_blocks: 16
-num_heads: 16
+hidden_dim: 1024
+num_blocks: 32
+num_heads: 32
 num_repeats: 8
 bottleneck_dim: 16
 patch_size: 16
@@ -43,8 +43,8 @@ samples:
   every: 200
   num_steps: 64
   cfg_scale: 3.0
-  width: 256
-  height: 256
+  width: 128
+  height: 128
   max_context_len: null
   prompts:
     - "general 1girl solo portrait looking_at_viewer blue_hair short_hair blush cat_ears open_mouth cat_ears animal_ears red_eyes white_background"
@@ -53,8 +53,8 @@ samples:
   num_images_per_prompt: 9
   seed: 123
   columns: null
-output_dir: output/animeface-07
-checkpoint_path: output/animeface-07/checkpoints/last.ckpt
+output_dir: output/animeface-11
+checkpoint_path: output/animeface-11/checkpoints/last.ckpt
 
 seed: 123
 device: auto

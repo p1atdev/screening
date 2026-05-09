@@ -50,8 +50,8 @@ def test_init_class_flow_matching_model():
     label_ids = torch.randint(0, 10, (2,))
     timestep = torch.rand(2)
     attention_mask = torch.ones(
-        1, num_repeats + num_repeats + h_patch * w_patch
-    )  # [1, num_patches]
+        2, num_repeats + num_repeats + h_patch * w_patch
+    )  # [2, num_patches]
 
     output = model(
         images=images,

@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import flash_screening as FS
+
 
 def unit_length_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x / x.norm(p=2, dim=-1, keepdim=True).clip(min=eps)
@@ -148,28 +150,14 @@ def screening(
     key: torch.Tensor,
     value: torch.Tensor,
     #
-    window: torch.Tensor,
-    window_threshold: float,  # distance threshold for MiPE
     acceptance: torch.Tensor,  # similarity acceptance
+    window: torch.Tensor,
     #
     position_ids: torch.Tensor | None = None,  # [batch_size, seq_len, num_axes]
     attention_mask: torch.Tensor | None = None,  # [batch_size, seq_len] mask
     is_causal: bool = True,
     return_score: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    query = unit_length_norm(query)
-    key = unit_length_norm(key)
-    value = unit_length_norm(value)
-
-    # MiPE
-    if position_ids is not None:
-        freqs_cis = compute_freqs_cis(
-            position_ids=position_ids,
-            window=window,
-            window_threshold=window_threshold,
-        )
-        query = apply_mipe(query, freqs_cis)
-        key = apply_mipe(key, freqs_cis)
 
     similarity = query @ key.transpose(-2, -1)
 
@@ -310,6 +298,7 @@ class GatedScreening(nn.Module):
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
 
         q = self.pre_screening_reshape(self.to_q(hidden_states))
@@ -317,13 +306,27 @@ class GatedScreening(nn.Module):
         v = self.pre_screening_reshape(self.to_v(hidden_states))
         gate = self.pre_screening_reshape(self.to_gate(hidden_states))
 
-        screening_output = screening(
+        # RSS
+        q = unit_length_norm(q)
+        k = unit_length_norm(k)
+        v = unit_length_norm(v)
+
+        # MiPE
+        if position_ids is not None:
+            freqs_cis = compute_freqs_cis(
+                position_ids=position_ids,
+                window=self.window,
+                window_threshold=self.window_threshold,
+            )
+            q = apply_mipe(q, freqs_cis)
+            k = apply_mipe(k, freqs_cis)
+
+        screening_output = FS.flash_screening(
             query=q,
             key=k,
             value=v,
             position_ids=position_ids,
             window=self.window,
-            window_threshold=self.window_threshold,
             acceptance=self.acceptance,
             attention_mask=attention_mask,
             is_causal=self.is_causal,
@@ -341,6 +344,75 @@ class GatedScreening(nn.Module):
             self.screening_trace.clear()
 
         # print(f"screened: {screened.shape}, gate: {gate.shape}")
+        screened = screened * torch.tanh(F.silu(gate))
+
+        if self.trace_screening:
+            with torch.no_grad():
+                self.screening_trace["after_gate"] = screened.detach().cpu()
+
+        screened = self.post_screening_reshape(screened)
+
+        return self.to_out(screened) * self.scale
+
+
+class GatedCrossScreening(GatedScreening):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        context_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        context_position_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        q = self.pre_screening_reshape(self.to_q(hidden_states))
+        k = self.pre_screening_reshape(self.to_k(context_states))
+        v = self.pre_screening_reshape(self.to_v(context_states))
+        gate = self.pre_screening_reshape(self.to_gate(hidden_states))
+
+        # RSS
+        q = unit_length_norm(q)
+        k = unit_length_norm(k)
+        v = unit_length_norm(v)
+
+        # MiPE
+        if position_ids is not None and context_position_ids is not None:
+            freqs_cis = compute_freqs_cis(
+                position_ids=position_ids,
+                window=self.window,
+                window_threshold=self.window_threshold,
+            )
+            q = apply_mipe(q, freqs_cis)
+
+            context_freqs_cis = compute_freqs_cis(
+                position_ids=context_position_ids,
+                window=self.window,
+                window_threshold=self.window_threshold,
+            )
+            k = apply_mipe(k, context_freqs_cis)
+
+        screening_output = FS.flash_screening(
+            query=q,
+            key=k,
+            value=v,
+            position_ids=position_ids,
+            window=self.window,
+            acceptance=self.acceptance,
+            attention_mask=attention_mask,
+            is_causal=False,  # Cross-attention is typically non-causal
+            return_score=self.trace_screening,
+        )
+        if self.trace_screening:
+            screened, screening_score = screening_output
+            with torch.no_grad():
+                self.screening_trace = {
+                    "score": screening_score.detach().cpu(),
+                    "before_gate": screened.detach().cpu(),
+                }
+        else:
+            screened = screening_output
+            self.screening_trace.clear()
+
         screened = screened * torch.tanh(F.silu(gate))
 
         if self.trace_screening:

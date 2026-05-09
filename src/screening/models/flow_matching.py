@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 
-from ..modules.screening import GatedScreening, unit_length_norm
+from ..modules.screening import GatedScreening, GatedCrossScreening, unit_length_norm
 from ..modules.common import SwiGLU
 from ..modules.context_encoder import ClassEncoder
 from ..flow import image_pred_to_velocity_pred
@@ -571,6 +571,7 @@ class MultiScreenForContextFlowMatching(nn.Module):
 
         self.layers = nn.ModuleList(
             [
+                # GatedCrossScreening(
                 GatedScreening(
                     hidden_dim=hidden_dim,
                     num_heads=num_heads,
@@ -687,9 +688,18 @@ class MultiScreenForContextFlowMatching(nn.Module):
         )  # [batch_size, num_repeats, 3]
 
     def prepare_noise_image(
-        self, height: int, width: int, batch_size: int
+        self, height: int, width: int, batch_size: int, seed: int | None = None
     ) -> torch.Tensor:
-        noise = torch.randn(batch_size, self.in_channels, height, width)
+        generator = torch.Generator()
+        if seed is not None:
+            generator.manual_seed(seed)
+        noise = torch.randn(
+            batch_size,
+            self.in_channels,
+            height,
+            width,
+            generator=generator,
+        )
 
         return noise
 
@@ -767,14 +777,18 @@ class MultiScreenForContextFlowMatching(nn.Module):
                 hidden_states = hidden_states + checkpoint.checkpoint(
                     layer,
                     hidden_states,
+                    # context_states,
                     position_ids,
+                    # context_ids,
                     attention_mask,
                     use_reentrant=False,
                 )  # type: ignore
             else:
                 hidden_states = hidden_states + layer(
                     hidden_states=hidden_states,
+                    # context_states=context_states,
                     position_ids=position_ids,
+                    # context_position_ids=context_ids,
                     attention_mask=attention_mask,
                 )
 
@@ -803,6 +817,7 @@ class MultiScreenForContextFlowMatching(nn.Module):
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
         max_context_len: int = 64,
+        seed: int | None = None,
     ) -> list[Image.Image]:
         assert width % self.patch_size == 0 and height % self.patch_size == 0, (
             "Width and height must be divisible by patch size."
@@ -826,7 +841,7 @@ class MultiScreenForContextFlowMatching(nn.Module):
                     "Length of negative prompts must match the number of prompts."
                 )
 
-        noisy_image = self.prepare_noise_image(height, width, batch_size).to(
+        noisy_image = self.prepare_noise_image(height, width, batch_size, seed=seed).to(
             device,
             dtype,
         )

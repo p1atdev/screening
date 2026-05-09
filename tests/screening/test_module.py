@@ -209,7 +209,6 @@ def test_screening_uses_default_causal_positions_without_mipe_position_ids():
         key=key,
         value=value,
         window=torch.tensor([10.0]),
-        window_threshold=1.0,
         acceptance=torch.tensor([1.0]),
         position_ids=None,
     )
@@ -233,7 +232,6 @@ def test_screening_attention_mask_removes_masked_key_contribution():
         value=value,
         position_ids=torch.tensor([[0, 1, 2]], dtype=torch.long),
         window=torch.tensor([10.0]),
-        window_threshold=1.0,
         acceptance=torch.tensor([1.0]),
     )
     masked = screening(
@@ -242,7 +240,6 @@ def test_screening_attention_mask_removes_masked_key_contribution():
         value=value,
         position_ids=torch.tensor([[0, 1, 2]], dtype=torch.long),
         window=torch.tensor([10.0]),
-        window_threshold=1.0,
         acceptance=torch.tensor([1.0]),
         attention_mask=torch.tensor([[1, 0, 1]], dtype=torch.bool),
     )

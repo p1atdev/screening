@@ -8,6 +8,7 @@ from .screening import (
     causal_softmask,
     screening,
     GatedScreening,
+    GatedCrossScreening,
 )
 
 __all__ = [
