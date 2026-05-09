@@ -4,7 +4,7 @@ download: true
 hidden_dim: 64
 num_heads: 8
 num_blocks: 8
-patch_size: 7
+patch_size: 2
 window_threshold: 256.0
 
 batch_size: 256
@@ -31,5 +31,5 @@ precision: fp32
 
 wandb_project: screening-mnist
 wandb_run_name: null
-wandb_mode: online
-checkpoint_path: null
+wandb_mode: online # options: online, offline, disabled
+checkpoint_path: output/mnist-05.ckpt
