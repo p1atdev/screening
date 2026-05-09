@@ -795,6 +795,7 @@ class MultiScreenForContextFlowMatching(nn.Module):
     def generate(
         self,
         prompts: str | list[str],
+        negative_prompts: str | list[str] | None = None,
         width: int = 128,
         height: int = 128,
         num_steps: int = 20,
@@ -814,6 +815,16 @@ class MultiScreenForContextFlowMatching(nn.Module):
 
         batch_size = len(prompts)
         do_cfg = cfg_scale > 1.0
+
+        if do_cfg:
+            if negative_prompts is None:
+                negative_prompts = [""] * batch_size
+            elif isinstance(negative_prompts, str):
+                negative_prompts = [negative_prompts] * batch_size
+            elif len(negative_prompts) != batch_size:
+                raise ValueError(
+                    "Length of negative prompts must match the number of prompts."
+                )
 
         noisy_image = self.prepare_noise_image(height, width, batch_size).to(
             device,
@@ -853,11 +864,34 @@ class MultiScreenForContextFlowMatching(nn.Module):
         )
 
         if do_cfg:
-            uncond_context, _ = self.context_encoder.encode_prompts(
-                [""] * batch_size, max_token_length=max_context_len
+            assert negative_prompts is not None
+            uncond_context, uncond_context_mask = self.context_encoder.encode_prompts(
+                negative_prompts, max_token_length=max_context_len
             )
             context = torch.cat([context, uncond_context], dim=0)
-            attention_mask = torch.cat([attention_mask, attention_mask], dim=0)
+            uncond_attention_mask = torch.cat(
+                [
+                    # patches
+                    torch.ones(
+                        (
+                            batch_size,
+                            noisy_image.size(2)
+                            * noisy_image.size(3)
+                            // self.patch_size**2,
+                        ),
+                        device=device,
+                        dtype=torch.long,
+                    ),
+                    uncond_context_mask.to(device=device, dtype=torch.long),
+                    torch.ones(
+                        (batch_size, self.num_repeats),
+                        device=device,
+                        dtype=torch.long,
+                    ),
+                ],
+                dim=1,
+            )
+            attention_mask = torch.cat([attention_mask, uncond_attention_mask], dim=0)
 
         for i in tqdm(range(num_steps), total=num_steps):
             timestep = timesteps[i]
