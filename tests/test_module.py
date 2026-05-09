@@ -6,6 +6,7 @@ from screening.modules import (
     apply_mipe,
     causal_softmask,
     mipe_rotation,
+    compute_freqs_cis,
     screening,
     tanh_norm,
     trim_similarity,
@@ -64,18 +65,96 @@ def test_mipe_rotation_is_disabled_at_threshold_and_above():
 
 
 def test_apply_mipe_rotates_only_first_two_dimensions():
-    sequence = torch.tensor([[[[1.0, 0.0, 5.0], [0.0, 1.0, 6.0]]]])
+    sequence = torch.tensor(
+        [
+            [
+                [
+                    [1.0, 0.0, 5.0, 2.0, 3.0],
+                    [0.0, 1.0, 6.0, 4.0, 1.0],
+                ]
+            ]
+        ]
+    )  # [batch_size=1, num_heads=1, seq_len=2, head_dim=5]
     position_ids = torch.tensor([[0, 1]])
 
-    encoded = apply_mipe(
-        sequence=sequence,
+    freqs_cis = compute_freqs_cis(
         position_ids=position_ids,
         window=torch.tensor([4.0]),
         window_threshold=8.0,
     )
 
-    torch.testing.assert_close(encoded[0, 0, 0], torch.tensor([1.0, 0.0, 5.0]))
-    torch.testing.assert_close(encoded[0, 0, 1, 2], torch.tensor(6.0))
+    encoded = apply_mipe(
+        sequence=sequence,
+        freqs_cis=freqs_cis,
+    )
+
+    torch.testing.assert_close(
+        encoded[0, 0, 0], torch.tensor([1.0, 0.0, 5.0, 2.0, 3.0])
+    )
+    torch.testing.assert_close(
+        encoded[0, 0, 1],
+        torch.tensor(
+            [
+                -math.sin(math.pi / 8),
+                math.cos(math.pi / 8),
+                6.0,
+                4.0,
+                1.0,
+            ]
+        ),
+    )
+
+
+def test_apply_mipe_rotates_2d():
+    sequence = torch.tensor(
+        [
+            [
+                [
+                    [1.0, 0.0, 5.0, 2.0, 3.0],
+                    [0.0, 1.0, 6.0, 4.0, 1.0],
+                    [0.0, 0.0, 7.0, 8.0, 9.0],
+                    [0.0, 2.0, 8.0, 4.0, 3.0],
+                ]
+            ]
+        ]
+    )  # [batch_size=1, num_heads=1, seq_len=4, head_dim=5]
+    position_ids = torch.tensor(
+        [
+            [
+                [0, 0],
+                [0, 1],
+                [1, 0],
+                [1, 1],
+            ],
+        ]
+    )  # [batch_size=1, seq_len=4, num_axes=2]
+
+    freqs_cis = compute_freqs_cis(
+        position_ids=position_ids,
+        window=torch.tensor([4.0]),
+        window_threshold=8.0,
+    )
+
+    encoded = apply_mipe(
+        sequence=sequence,
+        freqs_cis=freqs_cis,
+    )
+
+    torch.testing.assert_close(
+        encoded[0, 0, 0], torch.tensor([1.0, 0.0, 5.0, 2.0, 3.0])
+    )
+    torch.testing.assert_close(
+        encoded[0, 0, 3],
+        torch.tensor(
+            [
+                -2 * math.sin(math.pi / 8),
+                2 * math.cos(math.pi / 8),
+                8 * math.cos(math.pi / 8) - 4 * math.sin(math.pi / 8),
+                8 * math.sin(math.pi / 8) + 4 * math.cos(math.pi / 8),
+                3.0,
+            ]
+        ),
+    )
 
 
 def test_causal_softmask_masks_future_and_out_of_window_positions():
@@ -96,6 +175,44 @@ def test_causal_softmask_masks_future_and_out_of_window_positions():
         ]
     )
     torch.testing.assert_close(mask, expected)
+
+
+def test_causal_softmask_accepts_singleton_axis_position_ids():
+    position_ids = torch.tensor([[0, 1, 2]], dtype=torch.long)
+    singleton_axis_position_ids = position_ids.unsqueeze(-1)
+
+    mask = causal_softmask(
+        position_ids=position_ids,
+        window=torch.tensor([2.0]),
+    )
+    singleton_axis_mask = causal_softmask(
+        position_ids=singleton_axis_position_ids,
+        window=torch.tensor([2.0]),
+    )
+
+    torch.testing.assert_close(singleton_axis_mask, mask)
+
+
+def test_screening_uses_default_causal_positions_without_mipe_position_ids():
+    query = torch.zeros(1, 1, 2, 2)
+    key = torch.zeros_like(query)
+    value = torch.zeros_like(query)
+    query[..., 0] = 1.0
+    key[..., 0] = 1.0
+    value[0, 0, 0] = torch.tensor([1.0, 0.0])
+    value[0, 0, 1] = torch.tensor([0.0, 1.0])
+
+    screened = screening(
+        query=query,
+        key=key,
+        value=value,
+        window=torch.tensor([10.0]),
+        window_threshold=1.0,
+        acceptance=torch.tensor([1.0]),
+        position_ids=None,
+    )
+
+    torch.testing.assert_close(screened[0, 0, 0, 1], torch.tensor(0.0))
 
 
 def test_screening_attention_mask_removes_masked_key_contribution():

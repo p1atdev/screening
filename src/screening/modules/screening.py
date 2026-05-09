@@ -8,8 +8,8 @@ def unit_length_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x / x.norm(p=2, dim=-1, keepdim=True).clip(min=eps)
 
 
-# MiPE is a RoPE-like rotation [18] applied only to the first two dimensions,
-# with a rotation angle modulated by the learned screening window w.
+# MiPE is a RoPE-like rotation [18] applied to one feature pair per position
+# axis, with a rotation angle modulated by the learned screening window w.
 def mipe_rotation(
     position_ids: torch.Tensor,  # [batch_size, seq_len]
     window: torch.Tensor,  # [num_heads]
@@ -37,26 +37,55 @@ def mipe_rotation(
     return rotation
 
 
-def apply_mipe(
-    sequence: torch.Tensor,  # [batch_size, num_heads, seq_len, head_dim]
-    position_ids: torch.Tensor,  # [batch_size, seq_len]
-    window: torch.Tensor,
+def compute_freqs_cis(
+    position_ids: torch.Tensor,  # [batch_size, seq_len, num_axes]
+    window: torch.Tensor,  # [num_heads]
     window_threshold: float = 256.0,
 ) -> torch.Tensor:
+    freqs_cis = []  # [batch_size, num_heads, seq_len, 2*num_axes]
 
-    rotation = mipe_rotation(
-        position_ids=position_ids,
-        window=window,
-        window_threshold=window_threshold,
-    )  # [batch_size, num_heads, seq_len]
+    if position_ids.ndim == 2:
+        position_ids = position_ids.unsqueeze(-1)  # [batch_size, seq_len, 1]
 
-    cos = torch.cos(rotation)
-    sin = torch.sin(rotation)
+    for axis in range(position_ids.size(-1)):
+        rotation = mipe_rotation(
+            position_ids=position_ids[..., axis],
+            window=window,
+            window_threshold=window_threshold,
+        )  # [batch_size, num_heads, seq_len]
 
-    x1 = sequence[..., 0] * cos - sequence[..., 1] * sin
-    x2 = sequence[..., 0] * sin + sequence[..., 1] * cos
+        freqs_cis.append(
+            torch.stack([torch.cos(rotation), torch.sin(rotation)], dim=-1)
+        )
+        # [batch_size, num_heads, seq_len, 2]
 
-    return torch.cat([x1.unsqueeze(-1), x2.unsqueeze(-1), sequence[..., 2:]], dim=-1)
+    return torch.cat(freqs_cis, dim=-1)
+
+
+def apply_mipe(
+    sequence: torch.Tensor,  # [batch_size, num_heads, seq_len, head_dim]
+    freqs_cis: torch.Tensor,  # [batch_size, num_heads, seq_len, 2 (cos, sin) * num_axes]
+) -> torch.Tensor:
+    _, _, _, encoded_dim = freqs_cis.size()
+
+    assert encoded_dim % 2 == 0, "encoded_dim must be even"
+    assert sequence.size(-1) >= encoded_dim, "head_dim must be >= encoded_dim"
+
+    x_even = sequence[..., :encoded_dim:2]
+    x_odd = sequence[..., 1:encoded_dim:2]
+
+    cos = freqs_cis[..., :encoded_dim:2]
+    sin = freqs_cis[..., 1:encoded_dim:2]
+
+    x1 = x_even * cos - x_odd * sin
+    x2 = x_even * sin + x_odd * cos
+
+    rotated = torch.stack((x1, x2), dim=-1).flatten(-2)
+
+    return torch.cat(
+        [rotated, sequence[..., encoded_dim:]],
+        dim=-1,
+    )
 
 
 def trim_similarity(
@@ -86,9 +115,17 @@ def tanh_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
 
 
 def causal_softmask(
-    position_ids: torch.Tensor,  # [batch_size, seq_len]
+    position_ids: torch.Tensor,  # [batch_size, seq_len] or [batch_size, seq_len, 1]
     window: torch.Tensor,  # [num_heads]
 ) -> torch.Tensor:
+    if position_ids.ndim == 3 and position_ids.size(-1) == 1:
+        position_ids = position_ids.squeeze(-1)
+
+    assert position_ids.ndim == 2, (
+        "Causal softmask only supports position ids shaped [batch_size, seq_len] "
+        "or [batch_size, seq_len, 1]"
+    )
+
     position_diff = position_ids[:, None, :] - position_ids[:, :, None]
     # [batch_size, seq_len, seq_len]
     position_diff = position_diff[:, None, :, :].repeat(
@@ -110,11 +147,12 @@ def screening(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    position_ids: torch.Tensor,
     #
     window: torch.Tensor,
     window_threshold: float,  # distance threshold for MiPE
     acceptance: torch.Tensor,  # similarity acceptance
+    #
+    position_ids: torch.Tensor | None = None,  # [batch_size, seq_len, num_axes]
     attention_mask: torch.Tensor | None = None,  # [batch_size, seq_len] mask
     is_causal: bool = True,
 ) -> torch.Tensor:
@@ -123,18 +161,14 @@ def screening(
     value = unit_length_norm(value)
 
     # MiPE
-    query = apply_mipe(
-        sequence=query,
-        position_ids=position_ids,
-        window=window,
-        window_threshold=window_threshold,
-    )
-    key = apply_mipe(
-        sequence=key,
-        position_ids=position_ids,
-        window=window,
-        window_threshold=window_threshold,
-    )
+    if position_ids is not None:
+        freqs_cis = compute_freqs_cis(
+            position_ids=position_ids,
+            window=window,
+            window_threshold=window_threshold,
+        )
+        query = apply_mipe(query, freqs_cis)
+        key = apply_mipe(key, freqs_cis)
 
     similarity = query @ key.transpose(-2, -1)
 
@@ -143,8 +177,16 @@ def screening(
 
     # Softmask
     if is_causal:
+        softmask_position_ids = position_ids
+        if softmask_position_ids is None:
+            batch_size, _, seq_len, _ = query.size()
+            softmask_position_ids = torch.arange(
+                seq_len,
+                device=query.device,
+            )[None, :].expand(batch_size, -1)
+
         softmask = causal_softmask(
-            position_ids=position_ids,
+            position_ids=softmask_position_ids,
             window=window,
         )  # [batch_size, num_heads, seq_len, seq_len]
         relevance = relevance * softmask
