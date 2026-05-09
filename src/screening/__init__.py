@@ -5,7 +5,7 @@ from .modules.screening import (
     causal_softmask,
     screening,
 )
-from .models import MultiScreenForCausalLM
+from .models import MultiScreenForCausalLM, MultiScreenForImageClassification
 from .tokenizer import ABCDTokenizer
 from .abcd_digits import generate_by_line_count, generate_by_token_count
 
@@ -14,6 +14,7 @@ __all__ = [
     "ABCDTokenizer",
     "GatedScreening",
     "MultiScreenForCausalLM",
+    "MultiScreenForImageClassification",
     "apply_mipe",
     "causal_softmask",
     "generate_by_line_count",
