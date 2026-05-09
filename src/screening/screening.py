@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint
 
 
 def unit_length_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -365,6 +366,8 @@ class MultiScreen(nn.Module):
             vocab_size=vocab_size,
         )
 
+        self.gradient_checkpointing = False
+
         self.init_weights()
 
     def init_weights(self):
@@ -396,6 +399,9 @@ class MultiScreen(nn.Module):
                     module.weight, mean=0.0, std=0.1 / math.sqrt(module.embedding_dim)
                 )
 
+    def set_gradient_checkpointing(self, value: bool):
+        self.gradient_checkpointing = value
+
     def forward(
         self,
         input_ids: torch.LongTensor,
@@ -405,11 +411,20 @@ class MultiScreen(nn.Module):
         hidden_states = self.token_embedding(input_ids)
 
         for layer in self.layers:
-            hidden_states = hidden_states + layer(
-                hidden_states=hidden_states,
-                position_ids=position_ids,
-                attention_mask=attention_mask,
-            )
+            if self.gradient_checkpointing and self.training:
+                hidden_states = hidden_states + checkpoint.checkpoint(
+                    layer,
+                    hidden_states,
+                    position_ids,
+                    attention_mask,
+                    use_reentrant=False,
+                )
+            else:
+                hidden_states = hidden_states + layer(
+                    hidden_states=hidden_states,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                )
 
         logits = self.head(hidden_states)
 

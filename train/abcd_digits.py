@@ -1,6 +1,7 @@
 import argparse
 import math
 import random
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Literal, Self, cast
 
@@ -15,6 +16,7 @@ from tqdm import tqdm
 from screening import ABCDTokenizer, MultiScreen, generate_by_line_count
 
 WandbMode = Literal["online", "offline", "disabled"]
+Precision = Literal["fp32", "fp16", "bf16"]
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "abcd_digits.yaml"
 
@@ -43,6 +45,8 @@ class TrainConfig(BaseModel):
     seed: int = 123
     device: str = Field(default="auto", min_length=1)
     num_workers: int = Field(default=0, ge=0)
+    gradient_checkpointing: bool = False
+    precision: Precision = "fp32"
     wandb_project: str = Field(default="screening-abcdigits", min_length=1)
     wandb_run_name: str | None = None
     wandb_mode: WandbMode = "online"
@@ -172,6 +176,16 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--device", type=str)
     parser.add_argument("--num-workers", type=int)
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    parser.add_argument(
+        "--precision",
+        type=str,
+        choices=["fp32", "fp16", "bf16"],
+    )
     parser.add_argument("--wandb-project", type=str)
     parser.add_argument("--wandb-run-name", type=str)
     parser.add_argument(
@@ -204,6 +218,8 @@ def parse_args() -> TrainConfig:
         "seed",
         "device",
         "num_workers",
+        "gradient_checkpointing",
+        "precision",
         "wandb_project",
         "wandb_run_name",
         "checkpoint_path",
@@ -242,6 +258,44 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def validate_precision_config(cfg: TrainConfig, device: torch.device) -> None:
+    if cfg.precision == "fp32":
+        return
+    if not torch.amp.autocast_mode.is_autocast_available(device.type):
+        raise RuntimeError(
+            f"mixed precision is not supported for device type {device.type!r}"
+        )
+    if cfg.precision == "bf16" and device.type == "cuda":
+        if not torch.cuda.is_bf16_supported():
+            raise RuntimeError(
+                "bf16 mixed precision requires a CUDA device with bf16 support"
+            )
+
+
+def precision_dtype(precision: Precision) -> torch.dtype | None:
+    if precision == "fp32":
+        return None
+    if precision == "fp16":
+        return torch.float16
+    return torch.bfloat16
+
+
+def precision_autocast(device: torch.device, precision: Precision) -> Any:
+    dtype = precision_dtype(precision)
+    if dtype is None:
+        return nullcontext()
+    return torch.autocast(device_type=device.type, dtype=dtype)
+
+
+def make_grad_scaler(
+    device: torch.device,
+    precision: Precision,
+) -> torch.amp.GradScaler | None:
+    if precision == "fp16":
+        return torch.amp.GradScaler(device.type)
+    return None
 
 
 def build_datasets(cfg: TrainConfig) -> tuple[ABCDigitsCompletionDataset, ...]:
@@ -293,18 +347,21 @@ def answer_loss(
 def forward_loss(
     model: MultiScreen,
     batch: dict[str, Any],
+    device: torch.device,
+    precision: Precision,
 ) -> torch.Tensor:
     input_ids = batch["input_ids"]
-    logits = model(
-        input_ids=input_ids,
-        position_ids=make_position_ids(input_ids),
-        attention_mask=batch["attention_mask"],
-    )
-    return answer_loss(
-        logits=logits,
-        labels=batch["labels"],
-        loss_mask=batch["loss_mask"],
-    )
+    with precision_autocast(device, precision):
+        logits = model(
+            input_ids=input_ids,
+            position_ids=make_position_ids(input_ids),
+            attention_mask=batch["attention_mask"],
+        )
+        return answer_loss(
+            logits=logits,
+            labels=batch["labels"],
+            loss_mask=batch["loss_mask"],
+        )
 
 
 def pad_token_lists(
@@ -338,6 +395,7 @@ def greedy_answer_ids(
     n_digits: int,
     pad_token_id: int,
     device: torch.device,
+    precision: Precision,
 ) -> torch.Tensor:
     generated = [tokens.clone() for tokens in prompt_ids]
     answer_chunks: list[torch.Tensor] = []
@@ -348,11 +406,12 @@ def greedy_answer_ids(
             pad_token_id=pad_token_id,
             device=device,
         )
-        logits = model(
-            input_ids=input_ids,
-            position_ids=make_position_ids(input_ids),
-            attention_mask=attention_mask,
-        )
+        with precision_autocast(device, precision):
+            logits = model(
+                input_ids=input_ids,
+                position_ids=make_position_ids(input_ids),
+                attention_mask=attention_mask,
+            )
         last_positions = attention_mask.sum(dim=1) - 1
         next_logits = logits[
             torch.arange(logits.size(0), device=device), last_positions
@@ -384,12 +443,13 @@ def evaluate(
     for raw_batch in loader:
         batch = move_batch(raw_batch, device)
         input_ids = batch["input_ids"]
-        logits = model(
-            input_ids=input_ids,
-            position_ids=make_position_ids(input_ids),
-            attention_mask=batch["attention_mask"],
-        )
-        loss = answer_loss(logits, batch["labels"], batch["loss_mask"])
+        with precision_autocast(device, cfg.precision):
+            logits = model(
+                input_ids=input_ids,
+                position_ids=make_position_ids(input_ids),
+                attention_mask=batch["attention_mask"],
+            )
+            loss = answer_loss(logits, batch["labels"], batch["loss_mask"])
         loss_tokens = int(batch["loss_mask"].sum().item())
         total_loss += float(loss.item()) * loss_tokens
         total_loss_tokens += loss_tokens
@@ -400,6 +460,7 @@ def evaluate(
             n_digits=cfg.n_digits,
             pad_token_id=tokenizer.pad_token_id,
             device=device,
+            precision=cfg.precision,
         )
         target_ids = raw_batch["answer_ids"]
         matches = pred_ids.eq(target_ids)
@@ -440,6 +501,7 @@ def save_checkpoint(
 def train(cfg: TrainConfig) -> None:
     seed_everything(cfg.seed)
     device = get_device(cfg.device)
+    validate_precision_config(cfg, device)
     tokenizer = ABCDTokenizer()
     train_dataset, val_dataset = build_datasets(cfg)
     collator = ABCDigitsCollator(tokenizer=tokenizer, n_digits=cfg.n_digits)
@@ -466,12 +528,14 @@ def train(cfg: TrainConfig) -> None:
         vocab_size=tokenizer.vocab_size,
         window_threshold=cfg.window_threshold,
     ).to(device)
+    model.set_gradient_checkpointing(cfg.gradient_checkpointing)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=cfg.lr,
         betas=cfg.betas,
         weight_decay=cfg.weight_decay,
     )
+    grad_scaler = make_grad_scaler(device=device, precision=cfg.precision)
 
     run = wandb.init(
         project=cfg.wandb_project,
@@ -492,9 +556,19 @@ def train(cfg: TrainConfig) -> None:
         for raw_batch in progress:
             batch = move_batch(raw_batch, device)
             optimizer.zero_grad(set_to_none=True)
-            loss = forward_loss(model, batch)
-            loss.backward()
-            optimizer.step()
+            loss = forward_loss(
+                model=model,
+                batch=batch,
+                device=device,
+                precision=cfg.precision,
+            )
+            if grad_scaler is None:
+                loss.backward()
+                optimizer.step()
+            else:
+                grad_scaler.scale(loss).backward()
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
 
             step += 1
             running_loss += float(loss.item())

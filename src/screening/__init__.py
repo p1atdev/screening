@@ -1,4 +1,4 @@
-from .module import (
+from .screening import (
     MultiScreen,
     GatedScreening,
     apply_mipe,

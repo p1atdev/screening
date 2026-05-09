@@ -2,7 +2,7 @@ import math
 
 import torch
 
-from screening.module import (
+from screening.screening import (
     MultiScreen,
     apply_mipe,
     causal_softmask,
@@ -203,6 +203,27 @@ def test_init_multiscreen_with_grad():
         attention_mask=torch.tensor(
             [[1, 1, 0], [1, 1, 1]], dtype=torch.float
         ),  # Example mask
+    )
+
+    loss = logits.sum()
+    loss.backward()
+
+
+def test_multiscreen_gradient_checkpointing_with_grad():
+    tokenizer = ABCDTokenizer()
+    model = MultiScreen(
+        hidden_dim=64,
+        num_heads=4,
+        num_blocks=2,
+        vocab_size=tokenizer.vocab_size,
+        window_threshold=10.0,
+    )
+    model.set_gradient_checkpointing(True)
+
+    logits = model(
+        input_ids=torch.tensor([[0, 1, 2], [3, 4, 5]], dtype=torch.long),
+        position_ids=torch.tensor([[0, 1, 2], [0, 1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1, 0], [1, 1, 1]], dtype=torch.float),
     )
 
     loss = logits.sum()

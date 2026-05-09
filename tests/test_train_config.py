@@ -17,6 +17,8 @@ def test_load_config_uses_yaml_and_overrides(tmp_path: Path):
                 "hidden_dim: 16",
                 "num_heads: 4",
                 "betas: [0.8, 0.9]",
+                "gradient_checkpointing: true",
+                "precision: bf16",
                 "wandb_mode: disabled",
             ]
         ),
@@ -28,9 +30,16 @@ def test_load_config_uses_yaml_and_overrides(tmp_path: Path):
     assert cfg.train_samples == 16
     assert cfg.val_samples == 4
     assert cfg.betas == (0.8, 0.9)
+    assert cfg.gradient_checkpointing is True
+    assert cfg.precision == "bf16"
     assert cfg.wandb_mode == "disabled"
 
 
 def test_train_config_rejects_incompatible_head_shape():
     with pytest.raises(ValidationError):
         TrainConfig(hidden_dim=10, num_heads=4)
+
+
+def test_train_config_rejects_unknown_precision():
+    with pytest.raises(ValidationError):
+        TrainConfig(precision="tf32")
