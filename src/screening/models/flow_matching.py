@@ -52,6 +52,7 @@ class BottleneckPatchEmbedding(nn.Module):
         )  # [batch_size, num_patches, hidden_dim]
 
         return unit_length_norm(patches)
+        # return patches
 
 
 class LabelEmbedding(nn.Module):
@@ -424,7 +425,7 @@ class MultiScreenForClassFlowMatching(nn.Module):
             :, :num_patches, :
         ]  # [batch_size, num_patches, hidden_dim]
         output = self.final_layer(
-            patches
+            unit_length_norm(patches)
         )  # [batch_size, num_patches, patch_size * patch_size * in_channels]
         images = self.pixel_shuffle(
             output, height, width
@@ -448,6 +449,7 @@ class MultiScreenForClassFlowMatching(nn.Module):
         )
         dtype = dtype if dtype is not None else next(self.parameters()).dtype
         device = device if device is not None else next(self.parameters()).device
+        label_ids = label_ids.to(device=device)
 
         batch_size = label_ids.size(0)
         do_cfg = cfg_scale > 1.0

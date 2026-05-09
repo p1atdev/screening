@@ -1,8 +1,25 @@
-import math
-
 import torch
 
+from screening.flow import image_pred_to_velocity_pred
 from screening.models import MultiScreenForClassFlowMatching
+
+
+def test_image_pred_to_velocity_pred_matches_clean_to_noise_velocity():
+    clean_image = torch.tensor([[[[2.0]]]])
+    noise_image = torch.tensor([[[[-1.0]]]])
+    timestep = torch.tensor([0.25])
+    noisy_image = (
+        timestep[:, None, None, None] * clean_image
+        + (1.0 - timestep[:, None, None, None]) * noise_image
+    )
+
+    velocity = image_pred_to_velocity_pred(
+        pred_image=clean_image,
+        noisy_image=noisy_image,
+        timestep=timestep,
+    )
+
+    torch.testing.assert_close(velocity, clean_image - noise_image)
 
 
 def test_init_class_flow_matching_model():

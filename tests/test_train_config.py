@@ -1,12 +1,16 @@
 from pathlib import Path
 
 import pytest
+import torch
 from pydantic import ValidationError
 
 from train.abcd_digits import TrainConfig as ABCDigitsTrainConfig
 from train.abcd_digits import load_config as load_abcd_digits_config
 from train.mnist import TrainConfig as MNISTTrainConfig
 from train.mnist import load_config as load_mnist_config
+from train.flow_matching import TrainConfig as FlowMatchingTrainConfig
+from train.flow_matching import apply_cfg_dropout
+from train.flow_matching import load_config as load_flow_matching_config
 
 
 def test_load_abcd_digits_config_uses_yaml_and_overrides(tmp_path: Path):
@@ -97,3 +101,86 @@ def test_mnist_train_config_rejects_unknown_precision():
 def test_mnist_train_config_rejects_unknown_wandb_mode():
     with pytest.raises(ValidationError):
         MNISTTrainConfig(wandb_mode="dry-run")
+
+
+def test_load_flow_matching_config_uses_yaml_and_overrides(tmp_path: Path):
+    config_path = tmp_path / "flow_matching.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "data_dir: ./one-image",
+                "image_path: ./one-image/single.webp",
+                "image_mode: RGB",
+                "image_size: 32",
+                "label_id: 0",
+                "num_classes: 1",
+                "hidden_dim: 32",
+                "num_heads: 4",
+                "num_blocks: 2",
+                "patch_size: 16",
+                "betas: [0.8, 0.9]",
+                "cfg_dropout_prob: 0.25",
+                "gradient_checkpointing: true",
+                "precision: bf16",
+                "wandb_project: screening-flow-test",
+                "wandb_run_name: smoke",
+                "wandb_mode: offline",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_flow_matching_config(config_path, overrides={"batch_size": 4})
+
+    assert cfg.data_dir == Path("one-image")
+    assert cfg.image_path == Path("one-image/single.webp")
+    assert cfg.batch_size == 4
+    assert cfg.hidden_dim == 32
+    assert cfg.betas == (0.8, 0.9)
+    assert cfg.cfg_dropout_prob == 0.25
+    assert cfg.gradient_checkpointing is True
+    assert cfg.precision == "bf16"
+    assert cfg.wandb_project == "screening-flow-test"
+    assert cfg.wandb_run_name == "smoke"
+    assert cfg.wandb_mode == "offline"
+    assert cfg.in_channels == 3
+
+
+def test_flow_matching_train_config_rejects_incompatible_head_shape():
+    with pytest.raises(ValidationError):
+        FlowMatchingTrainConfig(hidden_dim=10, num_heads=4)
+
+
+def test_flow_matching_train_config_rejects_odd_hidden_dim():
+    with pytest.raises(ValidationError):
+        FlowMatchingTrainConfig(hidden_dim=15, num_heads=5)
+
+
+def test_flow_matching_train_config_rejects_bad_image_shape():
+    with pytest.raises(ValidationError):
+        FlowMatchingTrainConfig(image_size=30, patch_size=16)
+
+
+def test_flow_matching_train_config_rejects_bad_cfg_dropout_prob():
+    with pytest.raises(ValidationError):
+        FlowMatchingTrainConfig(cfg_dropout_prob=1.1)
+
+
+def test_apply_cfg_dropout_can_force_unconditional_labels():
+    labels = torch.tensor([0, 1, 2])
+
+    kept, keep_fraction = apply_cfg_dropout(
+        label_ids=labels,
+        uncond_id=9,
+        dropout_prob=0.0,
+    )
+    dropped, drop_fraction = apply_cfg_dropout(
+        label_ids=labels,
+        uncond_id=9,
+        dropout_prob=1.0,
+    )
+
+    torch.testing.assert_close(kept, labels)
+    torch.testing.assert_close(dropped, torch.full_like(labels, 9))
+    assert keep_fraction == 0.0
+    assert drop_fraction == 1.0
