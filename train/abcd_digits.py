@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from screening import ABCDTokenizer, MultiScreen, generate_by_line_count
+from screening import ABCDTokenizer, MultiScreenForCausalLM, generate_by_line_count
 
 WandbMode = Literal["online", "offline", "disabled"]
 Precision = Literal["fp32", "fp16", "bf16"]
@@ -345,7 +345,7 @@ def answer_loss(
 
 
 def forward_loss(
-    model: MultiScreen,
+    model: MultiScreenForCausalLM,
     batch: dict[str, Any],
     device: torch.device,
     precision: Precision,
@@ -390,7 +390,7 @@ def pad_token_lists(
 
 @torch.no_grad()
 def greedy_answer_ids(
-    model: MultiScreen,
+    model: MultiScreenForCausalLM,
     prompt_ids: list[torch.Tensor],
     n_digits: int,
     pad_token_id: int,
@@ -426,7 +426,7 @@ def greedy_answer_ids(
 
 @torch.no_grad()
 def evaluate(
-    model: MultiScreen,
+    model: MultiScreenForCausalLM,
     loader: DataLoader[dict[str, Any]],
     tokenizer: ABCDTokenizer,
     cfg: TrainConfig,
@@ -478,7 +478,7 @@ def evaluate(
 
 def save_checkpoint(
     path: str,
-    model: MultiScreen,
+    model: MultiScreenForCausalLM,
     optimizer: torch.optim.Optimizer,
     cfg: TrainConfig,
     step: int,
@@ -521,7 +521,7 @@ def train(cfg: TrainConfig) -> None:
         collate_fn=collator,
     )
 
-    model = MultiScreen(
+    model = MultiScreenForCausalLM(
         hidden_dim=cfg.hidden_dim,
         num_heads=cfg.num_heads,
         num_blocks=cfg.num_blocks,

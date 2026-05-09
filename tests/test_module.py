@@ -2,8 +2,7 @@ import math
 
 import torch
 
-from screening.screening import (
-    MultiScreen,
+from screening.modules import (
     apply_mipe,
     causal_softmask,
     mipe_rotation,
@@ -12,6 +11,7 @@ from screening.screening import (
     trim_similarity,
     unit_length_norm,
 )
+from screening.models import MultiScreenForCausalLM
 from screening.tokenizer import ABCDTokenizer
 
 
@@ -133,7 +133,7 @@ def test_screening_attention_mask_removes_masked_key_contribution():
 
 
 def test_multiscreen_initial_scalar_parameters_match_paper_values():
-    model = MultiScreen(
+    model = MultiScreenForCausalLM(
         hidden_dim=64,
         num_heads=4,
         num_blocks=2,
@@ -162,7 +162,7 @@ def test_init_multiscreen_wo_grad():
     tokenizer = ABCDTokenizer()
     vocab_size = tokenizer.vocab_size
 
-    model = MultiScreen(
+    model = MultiScreenForCausalLM(
         hidden_dim=hidden_dim,
         num_heads=num_heads,
         num_blocks=num_blocks,
@@ -189,7 +189,7 @@ def test_init_multiscreen_with_grad():
     tokenizer = ABCDTokenizer()
     vocab_size = tokenizer.vocab_size
 
-    model = MultiScreen(
+    model = MultiScreenForCausalLM(
         hidden_dim=hidden_dim,
         num_heads=num_heads,
         num_blocks=num_blocks,
@@ -211,7 +211,7 @@ def test_init_multiscreen_with_grad():
 
 def test_multiscreen_gradient_checkpointing_with_grad():
     tokenizer = ABCDTokenizer()
-    model = MultiScreen(
+    model = MultiScreenForCausalLM(
         hidden_dim=64,
         num_heads=4,
         num_blocks=2,

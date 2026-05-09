@@ -69,7 +69,7 @@ class SwiGLU(nn.Module):
         self.w3 = nn.Linear(intermediate_dim, hidden_dim, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 
 class TransformerBlock(nn.Module):
