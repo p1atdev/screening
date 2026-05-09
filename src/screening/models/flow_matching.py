@@ -9,6 +9,7 @@ import torch.utils.checkpoint as checkpoint
 
 from ..modules.screening import GatedScreening, unit_length_norm
 from ..modules.common import SwiGLU
+from ..modules.context_encoder import ClassEncoder
 from ..flow import image_pred_to_velocity_pred
 from ..image import tensor_to_pil
 
@@ -494,6 +495,389 @@ class MultiScreenForClassFlowMatching(nn.Module):
                 images=batch_noisy_image,
                 label_ids=batch_label_ids,
                 timestep=batch_timestep,
+            )
+
+            velocity_pred = image_pred_to_velocity_pred(
+                pred_image=pred_image,
+                noisy_image=batch_noisy_image,
+                timestep=batch_timestep,
+            )
+
+            if do_cfg:
+                velocity_cond, velocity_uncond = velocity_pred.chunk(2, dim=0)
+                velocity_pred = velocity_uncond + cfg_scale * (
+                    velocity_cond - velocity_uncond
+                )
+
+            noisy_image = noisy_image + velocity_pred * (next_timestep - timestep)
+
+        images = tensor_to_pil(noisy_image)
+
+        return images
+
+
+# multi-label version
+class MultiScreenForContextFlowMatching(nn.Module):
+    def __init__(
+        self,
+        hidden_dim: int,  # phi^2
+        num_heads: int,  # phi
+        num_blocks: int,  # phi
+        label2id: dict[str, int],
+        num_repeats: int = 8,
+        bottleneck_dim: int = 16,
+        in_channels: int = 3,
+        patch_size: int = 16,
+        window_threshold: float = 256.0,
+        label_splitter: str = " ",
+    ):
+        super().__init__()
+
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        self.num_blocks = num_blocks
+        self.window_threshold = window_threshold
+        self.bottleneck_dim = bottleneck_dim
+        self.patch_size = patch_size
+        self.in_channels = in_channels
+        self.num_repeats = num_repeats
+
+        # context encoder
+        self.context_encoder = ClassEncoder(
+            label2id=label2id,
+            embedding_dim=hidden_dim,
+            splitter=label_splitter,
+            do_mask_padding=False,
+        )
+
+        # embeddings
+        self.patch_embedding = BottleneckPatchEmbedding(
+            in_channels=in_channels,
+            hidden_dim=hidden_dim,
+            bottleneck_dim=bottleneck_dim,
+            patch_size=patch_size,
+        )
+        self.context_embedding = nn.Linear(
+            hidden_dim,
+            hidden_dim,
+            bias=False,
+        )
+        self.time_embedding = TimeEmbedding(
+            time_embedding_dim=hidden_dim,
+            hidden_dim=hidden_dim,
+            num_repeats=num_repeats,
+        )
+
+        self.layers = nn.ModuleList(
+            [
+                GatedScreening(
+                    hidden_dim=hidden_dim,
+                    num_heads=num_heads,
+                    window_threshold=window_threshold,
+                    num_layers=num_blocks,
+                    is_causal=False,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+
+        self.final_layer = nn.Linear(
+            hidden_dim,
+            patch_size * patch_size * in_channels,
+            bias=False,
+        )
+
+        self.gradient_checkpointing = False
+
+        self.init_weights()
+
+    def init_weights(self):
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Linear):
+                if "to_gate" in name:
+                    nn.init.normal_(module.weight, mean=0.0, std=0.1)
+                elif "to_q" in name or "to_k" in name or "to_v" in name:
+                    nn.init.normal_(
+                        module.weight,
+                        mean=0.0,
+                        std=0.1 / math.sqrt(self.head_dim),
+                    )
+                elif "to_out" in name:
+                    nn.init.normal_(
+                        module.weight, mean=0.0, std=0.1 / math.sqrt(self.hidden_dim)
+                    )
+                else:
+                    nn.init.normal_(
+                        module.weight,
+                        mean=0.0,
+                        std=0.1 / math.sqrt(module.in_features),
+                    )
+
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(
+                    module.weight, mean=0.0, std=0.1 / math.sqrt(module.embedding_dim)
+                )
+
+    def set_gradient_checkpointing(self, value: bool):
+        self.gradient_checkpointing = value
+
+    def set_trace_screening(self, value: bool):
+        for layer in self.layers:
+            layer.set_trace_screening(value)  # type: ignore
+
+    def prepare_patch_position_ids(
+        self,
+        height: int,
+        width: int,
+        batch_size: int = 1,
+    ) -> torch.Tensor:
+        h_patch = height // self.patch_size
+        w_patch = width // self.patch_size
+        num_patches = h_patch * w_patch
+
+        position_ids = torch.stack(
+            [
+                torch.arange(w_patch).unsqueeze(0).expand(h_patch, -1)
+                - w_patch / 2,  # x position
+                torch.arange(h_patch).unsqueeze(1).expand(-1, w_patch)
+                - h_patch / 2,  # y position
+            ],
+            dim=-1,
+        ).view(num_patches, 2)  # [num_patches, 2]
+        modal_ids = torch.full((num_patches, 1), fill_value=2)
+
+        position_ids = torch.cat([position_ids, modal_ids], dim=-1)  # [num_patches, 3]
+
+        return position_ids.unsqueeze(0).expand(
+            batch_size, -1, -1
+        )  # [batch_size, num_patches, 3]
+
+    def prepare_context_position_ids(
+        self,
+        seq_len: int,
+        batch_size: int = 1,
+    ) -> torch.Tensor:
+        position_ids = (
+            torch.arange(seq_len).unsqueeze(1).repeat(1, 2)
+        ) - seq_len / 2  # [seq_len, 2]
+        modal_ids = torch.full((seq_len, 1), fill_value=1)
+
+        position_ids = torch.cat([position_ids, modal_ids], dim=-1)  # [seq_len, 3]
+
+        return position_ids.unsqueeze(0).expand(
+            batch_size, -1, -1
+        )  # [batch_size, seq_len, 3]
+
+    def prepare_time_position_ids(
+        self,
+        batch_size: int = 1,
+    ) -> torch.Tensor:
+        position_ids = (
+            torch.arange(self.num_repeats).unsqueeze(1).repeat(1, 2)
+        ) - self.num_repeats / 2  # [num_repeats, 2]
+        modal_ids = torch.full((self.num_repeats, 1), fill_value=0)
+
+        position_ids = torch.cat([position_ids, modal_ids], dim=-1)  # [num_repeats, 3]
+
+        return position_ids.unsqueeze(0).expand(
+            batch_size, -1, -1
+        )  # [batch_size, num_repeats, 3]
+
+    def prepare_noise_image(
+        self, height: int, width: int, batch_size: int
+    ) -> torch.Tensor:
+        noise = torch.randn(batch_size, self.in_channels, height, width)
+
+        return noise
+
+    def pixel_shuffle(
+        self,
+        patches: torch.Tensor,  # [batch_size, num_patches, patch_size * patch_size * in_channels]
+        height: int,
+        width: int,
+    ) -> torch.Tensor:
+        batch_size = patches.size(0)
+        height_p = height // self.patch_size
+        width_p = width // self.patch_size
+
+        patches = patches.transpose(1, 2).view(
+            batch_size,
+            self.patch_size**2 * self.in_channels,
+            height_p,
+            width_p,
+        )
+        images = F.pixel_shuffle(patches, upscale_factor=self.patch_size)
+
+        return images
+
+    def forward(
+        self,
+        images: torch.Tensor,  # [batch_size, in_channels, height, width]
+        context: torch.Tensor,  # [batch_size, seq_len, hidden_dim]
+        timestep: torch.Tensor,  # [batch_size]
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        batch_size, _in_channels, height, width = images.size()
+        assert height % self.patch_size == 0 and width % self.patch_size == 0, (
+            "Height and width must be divisible by patch size."
+        )
+
+        # prepare context
+        patches = self.patch_embedding(images)
+        num_patches = patches.size(1)
+
+        context_embeddings = self.context_embedding(context)
+        time_embeddings = self.time_embedding(timestep)
+        hidden_states = torch.cat(
+            [
+                patches,
+                context_embeddings,
+                time_embeddings,
+            ],
+            dim=1,
+        )  # [batch_size, num_patches + num_repeats + num_repeats, hidden_dim]
+
+        # prepare position ids
+        patch_ids = self.prepare_patch_position_ids(height, width, batch_size).to(
+            images.device
+        )
+        context_ids = self.prepare_context_position_ids(context.size(1), batch_size).to(
+            images.device
+        )
+        time_ids = self.prepare_time_position_ids(batch_size).to(images.device)
+        position_ids = torch.cat(
+            [
+                patch_ids,
+                context_ids,
+                time_ids,
+            ],
+            dim=1,
+        )
+
+        if attention_mask is not None:
+            assert attention_mask.size(1) == hidden_states.size(1), (
+                "Attention mask size must match the number of tokens."
+            )
+
+        for layer in self.layers:
+            if self.gradient_checkpointing and self.training:
+                hidden_states = hidden_states + checkpoint.checkpoint(
+                    layer,
+                    hidden_states,
+                    position_ids,
+                    attention_mask,
+                    use_reentrant=False,
+                )  # type: ignore
+            else:
+                hidden_states = hidden_states + layer(
+                    hidden_states=hidden_states,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                )
+
+        # select image patches
+        patches = hidden_states[
+            :, :num_patches, :
+        ]  # [batch_size, num_patches, hidden_dim]
+        output = self.final_layer(
+            unit_length_norm(patches)
+        )  # [batch_size, num_patches, patch_size * patch_size * in_channels]
+        images = self.pixel_shuffle(
+            output, height, width
+        )  # [batch_size, in_channels, height, width]
+
+        return images
+
+    @torch.inference_mode()
+    def generate(
+        self,
+        prompts: str | list[str],
+        width: int = 128,
+        height: int = 128,
+        num_steps: int = 20,
+        cfg_scale: float = 3.0,
+        dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
+        max_context_len: int = 64,
+    ) -> list[Image.Image]:
+        assert width % self.patch_size == 0 and height % self.patch_size == 0, (
+            "Width and height must be divisible by patch size."
+        )
+        dtype = dtype if dtype is not None else next(self.parameters()).dtype
+        device = device if device is not None else next(self.parameters()).device
+
+        if isinstance(prompts, str):
+            prompts = [prompts]
+
+        batch_size = len(prompts)
+        do_cfg = cfg_scale > 1.0
+
+        noisy_image = self.prepare_noise_image(height, width, batch_size).to(
+            device,
+            dtype,
+        )
+        timesteps = torch.linspace(
+            0.0,
+            1.0,
+            num_steps + 1,  # last is 1.0
+            device=device,
+            dtype=dtype,
+        )
+
+        context, context_mask = self.context_encoder.encode_prompts(
+            prompts, max_token_length=max_context_len
+        )
+        # attention mask (1: attend, 0: no attend)
+        attention_mask = torch.cat(
+            [
+                # patches
+                torch.ones(
+                    (
+                        batch_size,
+                        noisy_image.size(2) * noisy_image.size(3) // self.patch_size**2,
+                    ),
+                    device=device,
+                    dtype=torch.long,
+                ),
+                context_mask.to(device=device, dtype=torch.long),
+                torch.ones(
+                    (batch_size, self.num_repeats),
+                    device=device,
+                    dtype=torch.long,
+                ),
+            ],
+            dim=1,
+        )
+
+        if do_cfg:
+            uncond_context, _ = self.context_encoder.encode_prompts(
+                [""] * batch_size, max_token_length=max_context_len
+            )
+            context = torch.cat([context, uncond_context], dim=0)
+            attention_mask = torch.cat([attention_mask, attention_mask], dim=0)
+
+        for i in tqdm(range(num_steps), total=num_steps):
+            timestep = timesteps[i]
+            next_timestep = timesteps[i + 1]
+
+            batch_timestep = timestep.expand(batch_size)  # [batch_size]
+            batch_noisy_image = noisy_image
+
+            if do_cfg:
+                batch_noisy_image = batch_noisy_image.repeat(
+                    2, 1, 1, 1
+                )  # [batch_size * 2, in_channels, height, width]
+
+                batch_timestep = batch_timestep.repeat(2)  # [batch_size * 2]
+
+            pred_image = self.forward(
+                images=batch_noisy_image,
+                context=context,
+                timestep=batch_timestep,
+                attention_mask=attention_mask,
             )
 
             velocity_pred = image_pred_to_velocity_pred(

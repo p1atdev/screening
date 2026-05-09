@@ -1,7 +1,10 @@
 import torch
 
 from screening.flow import image_pred_to_velocity_pred
-from screening.models import MultiScreenForClassFlowMatching
+from screening.models import (
+    MultiScreenForClassFlowMatching,
+    MultiScreenForContextFlowMatching,
+)
 
 
 def test_image_pred_to_velocity_pred_matches_clean_to_noise_velocity():
@@ -82,6 +85,47 @@ def test_generate_class_flow_matching_model():
 
     images = model.generate(
         label_ids=label_ids,
+        width=image_size,
+        height=image_size,
+        num_steps=20,
+        cfg_scale=3.0,
+    )
+
+    assert isinstance(images, list)
+    assert len(images) == 2
+
+
+def test_generate_context_flow_matching_model():
+    image_size = 32
+    patch_size = 16
+    num_repeats = 8
+
+    model = MultiScreenForContextFlowMatching(
+        hidden_dim=64,
+        num_heads=4,
+        num_blocks=4,
+        label2id={
+            "cat": 0,
+            "dog": 1,
+            "car": 2,
+            "tree": 3,
+            "house": 4,
+            "person": 5,
+            "bicycle": 6,
+            "flower": 7,
+            "sky": 8,
+            "water": 9,
+        },
+        num_repeats=num_repeats,
+        bottleneck_dim=16,
+        in_channels=3,
+        patch_size=patch_size,
+    )
+
+    assert isinstance(model, MultiScreenForContextFlowMatching)
+
+    images = model.generate(
+        prompts=["cat, dog", "car, tree"],
         width=image_size,
         height=image_size,
         num_steps=20,
