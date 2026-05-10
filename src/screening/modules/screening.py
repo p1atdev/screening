@@ -5,6 +5,8 @@ import torch.nn.functional as F
 
 import flash_screening as FS
 
+from .common import SwiGLU
+
 
 def unit_length_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x / x.norm(p=2, dim=-1, keepdim=True).clip(min=eps)
@@ -422,3 +424,49 @@ class GatedCrossScreening(GatedScreening):
         screened = self.post_screening_reshape(screened)
 
         return self.to_out(screened) * self.scale
+
+
+class MultiScreenBlock(nn.Module):
+    # GatedScreening + SwiGLU
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        window_threshold: float = 256.0,
+        num_layers: int = 1,
+        is_causal: bool = True,
+    ):
+        super().__init__()
+
+        self.screening = GatedScreening(
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            window_threshold=window_threshold,
+            num_layers=num_layers,
+            is_causal=is_causal,
+        )
+
+        self.mlp = SwiGLU(
+            hidden_dim,
+            hidden_dim,
+        )
+
+    def set_trace_screening(self, value: bool) -> None:
+        self.screening.set_trace_screening(value)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        hidden_states = hidden_states + self.screening(
+            hidden_states=unit_length_norm(hidden_states),
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            **kwargs,
+        )
+        hidden_states = hidden_states + self.mlp(unit_length_norm(hidden_states))
+
+        return hidden_states

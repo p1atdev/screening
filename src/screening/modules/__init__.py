@@ -9,10 +9,12 @@ from .screening import (
     screening,
     GatedScreening,
     GatedCrossScreening,
+    MultiScreenBlock,
 )
 
 __all__ = [
     "GatedScreening",
+    "MultiScreenBlock",
     "apply_mipe",
     "causal_softmask",
     "compute_freqs_cis",

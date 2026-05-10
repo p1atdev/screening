@@ -36,8 +36,8 @@ sample_at_start: true
 sample_num_images: 1
 sample_num_steps: 64
 sample_cfg_scale: 1.0
-output_dir: output/fm-05
-checkpoint_path: output/fm-05/checkpoints/last.ckpt
+output_dir: output/fm-09
+checkpoint_path: output/fm-09/checkpoints/last.ckpt
 
 seed: 123
 device: auto

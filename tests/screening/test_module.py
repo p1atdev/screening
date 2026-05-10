@@ -4,6 +4,7 @@ import torch
 
 from screening.modules import (
     GatedScreening,
+    MultiScreenBlock,
     apply_mipe,
     causal_softmask,
     mipe_rotation,
@@ -287,6 +288,36 @@ def test_gated_screening_traces_score_matrix_and_gate_outputs():
     _output = layer(hidden_states, position_ids=position_ids)
 
     assert layer.screening_trace == {}
+
+
+def test_multiscreen_block_delegates_screening_trace():
+    block = MultiScreenBlock(
+        hidden_dim=8,
+        num_heads=2,
+        window_threshold=8.0,
+        is_causal=False,
+    )
+    block.set_trace_screening(True)
+    hidden_states = torch.randn(1, 4, 8)
+    position_ids = torch.tensor(
+        [
+            [
+                [0, 0],
+                [0, 1],
+                [1, 0],
+                [1, 1],
+            ]
+        ]
+    )
+
+    output = block(hidden_states, position_ids=position_ids)
+
+    assert output.shape == hidden_states.shape
+    assert set(block.screening.screening_trace) == {
+        "score",
+        "before_gate",
+        "after_gate",
+    }
 
 
 def test_multiscreen_initial_scalar_parameters_match_paper_values():

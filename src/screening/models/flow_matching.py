@@ -7,7 +7,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 
-from ..modules.screening import GatedScreening, GatedCrossScreening, unit_length_norm
+from ..modules.screening import (
+    GatedScreening,
+    GatedCrossScreening,
+    MultiScreenBlock,
+    unit_length_norm,
+)
 from ..modules.common import SwiGLU
 from ..modules.context_encoder import ClassEncoder
 from ..flow import image_pred_to_velocity_pred
@@ -217,7 +222,8 @@ class MultiScreenForClassFlowMatching(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                GatedScreening(
+                # GatedScreening(
+                MultiScreenBlock(
                     hidden_dim=hidden_dim,
                     num_heads=num_heads,
                     window_threshold=window_threshold,
@@ -266,6 +272,8 @@ class MultiScreenForClassFlowMatching(nn.Module):
                 nn.init.normal_(
                     module.weight, mean=0.0, std=0.1 / math.sqrt(module.embedding_dim)
                 )
+            elif isinstance(module, nn.RMSNorm):
+                nn.init.ones_(module.weight)
 
     def set_gradient_checkpointing(self, value: bool):
         self.gradient_checkpointing = value
@@ -407,15 +415,17 @@ class MultiScreenForClassFlowMatching(nn.Module):
 
         for layer in self.layers:
             if self.gradient_checkpointing and self.training:
-                hidden_states = hidden_states + checkpoint.checkpoint(
+                # hidden_states = hidden_states + checkpoint.checkpoint(
+                hidden_states = checkpoint.checkpoint(
                     layer,
                     hidden_states,
                     position_ids,
                     attention_mask,
                     use_reentrant=False,
-                )  # type: ignore
+                )
             else:
-                hidden_states = hidden_states + layer(
+                # hidden_states = hidden_states + layer(
+                hidden_states = layer(
                     hidden_states=hidden_states,
                     position_ids=position_ids,
                     attention_mask=attention_mask,
@@ -572,7 +582,8 @@ class MultiScreenForContextFlowMatching(nn.Module):
         self.layers = nn.ModuleList(
             [
                 # GatedCrossScreening(
-                GatedScreening(
+                # GatedScreening(
+                MultiScreenBlock(
                     hidden_dim=hidden_dim,
                     num_heads=num_heads,
                     window_threshold=window_threshold,
@@ -621,6 +632,8 @@ class MultiScreenForContextFlowMatching(nn.Module):
                 nn.init.normal_(
                     module.weight, mean=0.0, std=0.1 / math.sqrt(module.embedding_dim)
                 )
+            elif isinstance(module, nn.RMSNorm):
+                nn.init.ones_(module.weight)
 
     def set_gradient_checkpointing(self, value: bool):
         self.gradient_checkpointing = value
@@ -774,7 +787,8 @@ class MultiScreenForContextFlowMatching(nn.Module):
 
         for layer in self.layers:
             if self.gradient_checkpointing and self.training:
-                hidden_states = hidden_states + checkpoint.checkpoint(
+                # hidden_states = hidden_states + checkpoint.checkpoint(
+                hidden_states = checkpoint.checkpoint(
                     layer,
                     hidden_states,
                     # context_states,
@@ -782,9 +796,10 @@ class MultiScreenForContextFlowMatching(nn.Module):
                     # context_ids,
                     attention_mask,
                     use_reentrant=False,
-                )  # type: ignore
+                )
             else:
-                hidden_states = hidden_states + layer(
+                # hidden_states = hidden_states + layer(
+                hidden_states = layer(
                     hidden_states=hidden_states,
                     # context_states=context_states,
                     position_ids=position_ids,
