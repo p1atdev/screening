@@ -13,9 +13,9 @@ include_general_tags: true
 tag_separator: " "
 max_context_len: 64
 
-hidden_dim: 256
-num_blocks: 16
-num_heads: 16
+hidden_dim: 1024
+num_blocks: 32
+num_heads: 32
 num_repeats: 8
 bottleneck_dim: 16
 patch_size: 16
@@ -53,8 +53,8 @@ samples:
   num_images_per_prompt: 9
   seed: 123
   columns: null
-output_dir: output/animeface-12
-checkpoint_path: output/animeface-12/checkpoints/last.ckpt
+output_dir: output/animeface-15
+checkpoint_path: output/animeface-15/checkpoints/last.ckpt
 
 seed: 123
 device: auto

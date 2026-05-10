@@ -553,6 +553,18 @@ def build_optimizer(
     raise ValueError(f"unsupported optimizer: {cfg.optimizer}")
 
 
+def count_parameters(model: torch.nn.Module) -> tuple[int, int]:
+    total = sum(parameter.numel() for parameter in model.parameters())
+    trainable = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
+    return trainable, total
+
+
+def format_parameter_count(count: int) -> str:
+    return f"{count:,}"
+
+
 def optimizer_train(optimizer: torch.optim.Optimizer) -> None:
     train_fn = getattr(optimizer, "train", None)
     if callable(train_fn):
@@ -914,6 +926,7 @@ def train(cfg: TrainConfig) -> None:
         label_splitter=cfg.tag_separator,
     ).to(device)
     model.set_gradient_checkpointing(cfg.gradient_checkpointing)
+    trainable_params, total_params = count_parameters(model)
 
     optimizer = build_optimizer(model.parameters(), cfg)
     grad_scaler = make_grad_scaler(device=device, precision=cfg.precision)
@@ -941,6 +954,8 @@ def train(cfg: TrainConfig) -> None:
                 f"image_size={cfg.image_size}",
                 f"in_channels={cfg.in_channels}",
                 f"labels={len(label2id)}",
+                f"trainable_params={format_parameter_count(trainable_params)}",
+                f"total_params={format_parameter_count(total_params)}",
             ]
         )
     )

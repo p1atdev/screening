@@ -296,6 +296,38 @@ def test_multiscreen_block_delegates_screening_trace():
         num_heads=2,
         window_threshold=8.0,
         is_causal=False,
+        use_flash=False,
+    )
+    block.set_trace_screening(True)
+    hidden_states = torch.randn(1, 4, 8)
+    position_ids = torch.tensor(
+        [
+            [
+                [0, 0],
+                [0, 1],
+                [1, 0],
+                [1, 1],
+            ]
+        ]
+    )
+
+    output = block(hidden_states, position_ids=position_ids)
+
+    assert output.shape == hidden_states.shape
+    assert set(block.screening.screening_trace) == {
+        "score",
+        "before_gate",
+        "after_gate",
+    }
+
+
+def test_multiscreen_block_flash_delegates_screening_trace():
+    block = MultiScreenBlock(
+        hidden_dim=8,
+        num_heads=2,
+        window_threshold=8.0,
+        is_causal=False,
+        use_flash=True,
     )
     block.set_trace_screening(True)
     hidden_states = torch.randn(1, 4, 8)

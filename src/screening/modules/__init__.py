@@ -8,12 +8,15 @@ from .screening import (
     causal_softmask,
     screening,
     GatedScreening,
+    FlashGatedScreening,
     GatedCrossScreening,
     MultiScreenBlock,
 )
 
 __all__ = [
     "GatedScreening",
+    "FlashGatedScreening",
+    "GatedCrossScreening",
     "MultiScreenBlock",
     "apply_mipe",
     "causal_softmask",

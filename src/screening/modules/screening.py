@@ -5,8 +5,6 @@ import torch.nn.functional as F
 
 import flash_screening as FS
 
-from .common import SwiGLU
-
 
 def unit_length_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x / x.norm(p=2, dim=-1, keepdim=True).clip(min=eps)
@@ -63,7 +61,7 @@ def compute_freqs_cis(
         )
         # [batch_size, num_heads, seq_len, 2]
 
-    return torch.cat(freqs_cis, dim=-1)
+    return torch.cat(freqs_cis, dim=-1).float()
 
 
 def apply_mipe(
@@ -75,8 +73,10 @@ def apply_mipe(
     assert encoded_dim % 2 == 0, "encoded_dim must be even"
     assert sequence.size(-1) >= encoded_dim, "head_dim must be >= encoded_dim"
 
-    x_even = sequence[..., :encoded_dim:2]
-    x_odd = sequence[..., 1:encoded_dim:2]
+    seq = sequence.float()
+
+    x_even = seq[..., :encoded_dim:2]
+    x_odd = seq[..., 1:encoded_dim:2]
 
     cos = freqs_cis[..., :encoded_dim:2]
     sin = freqs_cis[..., 1:encoded_dim:2]
@@ -87,9 +87,9 @@ def apply_mipe(
     rotated = torch.stack((x1, x2), dim=-1).flatten(-2)
 
     return torch.cat(
-        [rotated, sequence[..., encoded_dim:]],
+        [rotated, seq[..., encoded_dim:]],
         dim=-1,
-    )
+    ).type_as(sequence)
 
 
 def trim_similarity(
@@ -323,7 +323,7 @@ class GatedScreening(nn.Module):
             q = apply_mipe(q, freqs_cis)
             k = apply_mipe(k, freqs_cis)
 
-        screening_output = FS.flash_screening(
+        screening_output = screening(
             query=q,
             key=k,
             value=v,
@@ -357,6 +357,68 @@ class GatedScreening(nn.Module):
         return self.to_out(screened) * self.scale
 
 
+class FlashGatedScreening(GatedScreening):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+
+        q = self.pre_screening_reshape(self.to_q(hidden_states))
+        k = self.pre_screening_reshape(self.to_k(hidden_states))
+        v = self.pre_screening_reshape(self.to_v(hidden_states))
+        gate = self.pre_screening_reshape(self.to_gate(hidden_states))
+
+        # RSS
+        q = FS.unit_length_norm(q)
+        k = FS.unit_length_norm(k)
+        v = FS.unit_length_norm(v)
+
+        # MiPE
+        if position_ids is not None:
+            freqs_cis = FS.compute_freqs_cis(
+                position_ids=position_ids,
+                window=self.window,
+                window_threshold=self.window_threshold,
+            )
+            q = FS.apply_mipe(q, freqs_cis)
+            k = FS.apply_mipe(k, freqs_cis)
+
+        screening_output = FS.flash_screening(
+            query=q,
+            key=k,
+            value=v,
+            position_ids=position_ids,
+            window=self.window,
+            acceptance=self.acceptance,
+            attention_mask=attention_mask,
+            is_causal=self.is_causal,
+            return_score=self.trace_screening,
+        )
+        if self.trace_screening:
+            screened, screening_score = screening_output
+            with torch.no_grad():
+                self.screening_trace = {
+                    "score": screening_score.detach().cpu(),
+                    "before_gate": screened.detach().cpu(),
+                }
+        else:
+            screened = screening_output
+            self.screening_trace.clear()
+
+        screened = screened * torch.tanh(F.silu(gate))
+
+        if self.trace_screening:
+            with torch.no_grad():
+                self.screening_trace["after_gate"] = screened.detach().cpu()
+
+        screened = self.post_screening_reshape(screened)
+
+        return self.to_out(screened) * self.scale
+
+
 class GatedCrossScreening(GatedScreening):
     def forward(
         self,
@@ -373,25 +435,25 @@ class GatedCrossScreening(GatedScreening):
         gate = self.pre_screening_reshape(self.to_gate(hidden_states))
 
         # RSS
-        q = unit_length_norm(q)
-        k = unit_length_norm(k)
-        v = unit_length_norm(v)
+        q = FS.unit_length_norm(q)
+        k = FS.unit_length_norm(k)
+        v = FS.unit_length_norm(v)
 
         # MiPE
         if position_ids is not None and context_position_ids is not None:
-            freqs_cis = compute_freqs_cis(
+            freqs_cis = FS.compute_freqs_cis(
                 position_ids=position_ids,
                 window=self.window,
                 window_threshold=self.window_threshold,
             )
-            q = apply_mipe(q, freqs_cis)
+            q = FS.apply_mipe(q, freqs_cis)
 
-            context_freqs_cis = compute_freqs_cis(
+            context_freqs_cis = FS.compute_freqs_cis(
                 position_ids=context_position_ids,
                 window=self.window,
                 window_threshold=self.window_threshold,
             )
-            k = apply_mipe(k, context_freqs_cis)
+            k = FS.apply_mipe(k, context_freqs_cis)
 
         screening_output = FS.flash_screening(
             query=q,
@@ -427,7 +489,6 @@ class GatedCrossScreening(GatedScreening):
 
 
 class MultiScreenBlock(nn.Module):
-    # GatedScreening + SwiGLU
     def __init__(
         self,
         hidden_dim: int,
@@ -435,20 +496,18 @@ class MultiScreenBlock(nn.Module):
         window_threshold: float = 256.0,
         num_layers: int = 1,
         is_causal: bool = True,
+        use_flash: bool = True,
     ):
         super().__init__()
 
-        self.screening = GatedScreening(
+        screening_cls = FlashGatedScreening if use_flash else GatedScreening
+
+        self.screening = screening_cls(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             window_threshold=window_threshold,
             num_layers=num_layers,
             is_causal=is_causal,
-        )
-
-        self.mlp = SwiGLU(
-            hidden_dim,
-            hidden_dim,
         )
 
     def set_trace_screening(self, value: bool) -> None:
@@ -462,11 +521,10 @@ class MultiScreenBlock(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.screening(
-            hidden_states=unit_length_norm(hidden_states),
+            hidden_states=hidden_states,
             position_ids=position_ids,
             attention_mask=attention_mask,
             **kwargs,
         )
-        hidden_states = hidden_states + self.mlp(unit_length_norm(hidden_states))
 
         return hidden_states

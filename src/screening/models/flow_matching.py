@@ -7,11 +7,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 
+import flash_screening as FS
+
 from ..modules.screening import (
     GatedScreening,
+    FlashGatedScreening,
     GatedCrossScreening,
     MultiScreenBlock,
-    unit_length_norm,
 )
 from ..modules.common import SwiGLU
 from ..modules.context_encoder import ClassEncoder
@@ -57,7 +59,7 @@ class BottleneckPatchEmbedding(nn.Module):
             1, 2
         )  # [batch_size, num_patches, hidden_dim]
 
-        return unit_length_norm(patches)
+        return FS.unit_length_norm(patches)
         # return patches
 
 
@@ -102,7 +104,7 @@ class LabelEmbedding(nn.Module):
 
     def forward(self, label_ids: torch.Tensor) -> torch.Tensor:
         return (
-            unit_length_norm(self.embedding(label_ids))
+            FS.unit_length_norm(self.embedding(label_ids))
             .unsqueeze(1)
             .expand(-1, self.num_repeats, -1)
         ) + self.positional_embedding.unsqueeze(
@@ -229,6 +231,7 @@ class MultiScreenForClassFlowMatching(nn.Module):
                     window_threshold=window_threshold,
                     num_layers=num_blocks,
                     is_causal=False,
+                    use_flash=True,
                 )
                 for _ in range(num_blocks)
             ]
@@ -436,7 +439,7 @@ class MultiScreenForClassFlowMatching(nn.Module):
             :, :num_patches, :
         ]  # [batch_size, num_patches, hidden_dim]
         output = self.final_layer(
-            unit_length_norm(patches)
+            FS.unit_length_norm(patches)
         )  # [batch_size, num_patches, patch_size * patch_size * in_channels]
         images = self.pixel_shuffle(
             output, height, width
@@ -589,6 +592,7 @@ class MultiScreenForContextFlowMatching(nn.Module):
                     window_threshold=window_threshold,
                     num_layers=num_blocks,
                     is_causal=False,
+                    use_flash=True,
                 )
                 for _ in range(num_blocks)
             ]
@@ -812,7 +816,7 @@ class MultiScreenForContextFlowMatching(nn.Module):
             :, :num_patches, :
         ]  # [batch_size, num_patches, hidden_dim]
         output = self.final_layer(
-            unit_length_norm(patches)
+            FS.unit_length_norm(patches)
         )  # [batch_size, num_patches, patch_size * patch_size * in_channels]
         images = self.pixel_shuffle(
             output, height, width

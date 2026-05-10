@@ -16,6 +16,8 @@ from train.flow_matching import load_config as load_flow_matching_config
 from train.context_flow_matching import TrainConfig as ContextFlowMatchingTrainConfig
 from train.context_flow_matching import apply_prompt_dropout
 from train.context_flow_matching import build_optimizer
+from train.context_flow_matching import count_parameters
+from train.context_flow_matching import format_parameter_count
 from train.context_flow_matching import load_config as load_context_flow_matching_config
 from train.context_flow_matching import metadata_to_prompt
 from train.context_flow_matching import optimizer_eval
@@ -316,6 +318,20 @@ def test_context_build_optimizer_can_use_radam_schedule_free():
     optimizer_eval(optimizer)
 
     assert optimizer.__class__.__name__ == "RAdamScheduleFree"
+
+
+def test_context_parameter_count_excludes_frozen_parameters():
+    model = torch.nn.Sequential(
+        torch.nn.Linear(2, 3),
+        torch.nn.Linear(3, 1, bias=False),
+    )
+    model[1].weight.requires_grad = False
+
+    trainable, total = count_parameters(model)
+
+    assert trainable == 9
+    assert total == 12
+    assert format_parameter_count(1234567) == "1,234,567"
 
 
 def test_metadata_to_prompt_filters_unknown_tags_in_stable_order():
